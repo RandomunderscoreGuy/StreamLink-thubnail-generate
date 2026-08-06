@@ -1,0 +1,33 @@
+name: StreamLink Batch Processor
+
+on:
+  schedule:
+    # Runs every 2 hours (e.g., 12:00, 2:00, 4:00 UTC)
+    - cron: '0 */2 * * *'
+  workflow_dispatch: 
+    # This line adds a manual "Run workflow" button in the GitHub UI!
+
+jobs:
+  generate-previews:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Setup Node.js (for Wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Python Batch Processor
+        env:
+          # This injects your secrets securely into the server environment
+          API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          python3 batch_generate.py
