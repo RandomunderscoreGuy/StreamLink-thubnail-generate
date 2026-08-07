@@ -126,11 +126,11 @@ for idx, file_record in enumerate(pending_files):
         duration = float(raw_duration)
         log(f"   ⏱️ Duration: {duration}s")
 
-        # C. Short Video Logic
+        # C. Short Video Logic (Updated to 120 seconds)
         cdn_poster = f"https://cdn.streamlink.cloud/thumbnails/{unique_file_id}_poster.jpg"
         
-        if duration < 60:
-            log("   ⏩ Video under 60s. Generating thumbnail only...")
+        if duration < 120:
+            log("   ⏩ Video under 120s. Generating thumbnail only...")
             subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", "-i", direct_url, "-frames:v", "1", "-f", "image2", "-vf", "scale=1280:-2:flags=lanczos", "-q:v", "2", poster_file], timeout=TIMEOUT_SEC, check=True)
             
             if not os.path.exists(poster_file) or os.path.getsize(poster_file) < 1024:
