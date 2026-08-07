@@ -24,6 +24,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install Cloudflare Wrangler
+        run: npm install -g wrangler
+
       - name: Run Python Batch Processor
         env:
           # This injects your secrets securely into the server environment
@@ -31,4 +34,4 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          python3 batch_generate.py
+          python3 -u batch_generate.py
