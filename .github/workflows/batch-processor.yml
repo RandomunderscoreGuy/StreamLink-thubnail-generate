@@ -2,8 +2,8 @@ name: StreamLink Batch Processor
 
 on:
   schedule:
-    # Runs every 2 hours (e.g., 12:00, 2:00, 4:00 UTC)
-    - cron: '0 */2 * * *'
+   # Triggers 4 times a day (8:30 AM, 12:30 PM, 4:30 PM, and 8:30 PM IST)
+    - cron: '0 1,2,3,4 * * *'
   workflow_dispatch: 
     # This line adds a manual "Run workflow" button in the GitHub UI!
 
