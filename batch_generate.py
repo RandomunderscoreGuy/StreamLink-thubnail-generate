@@ -41,7 +41,7 @@ def update_db_status(target_url, name, status, poster_url=None):
 # 2. FETCH PENDING RECORDS FROM D1
 # ==========================================
 log(f"📥 Fetching up to {BATCH_SIZE} pending videos from D1...")
-fetch_sql = f"SELECT hash, target_url, name, size FROM global_assets WHERE preview_animation IS NULL AND (name LIKE '%.mp4%' OR name LIKE '%.mkv%' OR name LIKE '%.avi%' OR name LIKE '%.webm%') ORDER BY created_at DESC LIMIT {BATCH_SIZE};"
+fetch_sql = f"SELECT hash, target_url, name, size FROM global_assets WHERE preview_animation IS NULL AND (name LIKE '%.mp4' OR name LIKE '%.mkv' OR name LIKE '%.avi' OR name LIKE '%.webm') ORDER BY created_at DESC LIMIT {BATCH_SIZE};"
 result = subprocess.run(
     ["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], 
     capture_output=True, text=True
