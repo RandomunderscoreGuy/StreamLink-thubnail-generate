@@ -1,4 +1,4 @@
-name: StreamLink Batch Processor
+name: StreamLink Batch Processor 
 
 on:
   schedule:
