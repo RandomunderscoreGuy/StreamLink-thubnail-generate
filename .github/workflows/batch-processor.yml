@@ -29,7 +29,6 @@ jobs:
 
       - name: Run Python Batch Processor
         env:
-          # This injects your secrets securely into the server environment
           API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
