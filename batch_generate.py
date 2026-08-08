@@ -34,7 +34,9 @@ def log(message):
 def update_db_status(target_url, name, status, poster_url=None):
     poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
     safe_name = name.replace("'", "''") # Safely escape single quotes for SQL
-    sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}' WHERE target_url = '{target_url}' AND name = '{safe_name}';"
+    safe_target = target_url.replace("'", "''") # 🔒 Fix: Escape target_url to prevent SQL syntax breaks
+    
+    sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}' WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
 
 # ==========================================
@@ -85,12 +87,18 @@ for idx, file_record in enumerate(pending_files):
     target_url = file_record["target_url"]
     file_size = file_record["size"]
     
-    # 🚀 Combine Magnet Hash + Safe Filename for a 100% unique R2 path
-    magnet_hash = file_record["hash"].split("urn:btih:")[1].split("||")[0].upper()
+    log(f"\n[{idx + 1}/{len(pending_files)}] Processing: {name}")
+
+    # 🚀 Safe Hash Parsing with Fallback Check (Fixes the IndexError crash)
+    raw_hash = str(file_record.get("hash", ""))
+    if "urn:btih:" not in raw_hash or "||" not in raw_hash:
+        log(f"   ⚠️ WARNING: Skipping malformed hash for: {name}")
+        update_db_status(target_url, name, "FAILED_MALFORMED_HASH")
+        continue
+        
+    magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
     safe_name = re.sub(r'[^a-zA-Z0-9]', '_', name)
     unique_file_id = f"{magnet_hash}_{safe_name}"
-    
-    log(f"\n[{idx + 1}/{len(pending_files)}] Processing: {name}")
 
     # Define temp file paths
     poster_file = "thumbnail.jpg"
