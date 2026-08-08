@@ -1,8 +1,7 @@
 name: StreamLink Batch Processor 
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+
   workflow_dispatch:
     # This line adds a manual "Run workflow" button in the GitHub UI!
 
