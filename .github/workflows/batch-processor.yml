@@ -1,6 +1,7 @@
 name: StreamLink Batch Processor 
 
 on:
+  # 🚀 Only allow manual runs and external webhook triggers (cron-job.org)
   workflow_dispatch:
 
 concurrency:
