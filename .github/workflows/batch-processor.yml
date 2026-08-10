@@ -1,11 +1,9 @@
 name: StreamLink Batch Processor 
 
 on:
-
+  # 🚀 Only allow manual runs and external webhook triggers (cron-job.org)
   workflow_dispatch:
-    # This line adds a manual "Run workflow" button in the GitHub UI!
 
-# 🚀 PREVENT OVERLAP: Only allow ONE batch processor to run at any given time
 concurrency:
   group: preview-generator
   cancel-in-progress: false
@@ -13,7 +11,7 @@ concurrency:
 jobs:
   generate-previews:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 360
     
     steps:
       - name: Checkout Repository
