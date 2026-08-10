@@ -22,7 +22,7 @@ BATCH_SIZE = 10
 TIMEOUT_SEC = 180 
 
 # 🚀 5.5 Hours limit in seconds (19,800 seconds)
-MAX_RUNTIME_SEC = 5.5 * 3600
+MAX_RUNTIME_SEC = 5.75 * 3600
 ENGINE_START_TIME = time.time()
 
 headers = {
