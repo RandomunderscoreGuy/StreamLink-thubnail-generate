@@ -6,35 +6,104 @@ import json
 import time
 from datetime import datetime
 import re
+import boto3
+from botocore.config import Config
 
 # ==========================================
-# 1. CONFIGURATION & HELPERS
+# 1. CORE CONFIGURATION
 # ==========================================
 BEARER_TOKEN = os.environ.get("API_BEARER_TOKEN")
-if not BEARER_TOKEN:
-    print("❌ API_BEARER_TOKEN missing from environment variables! Please check your GitHub Secrets.")
-    exit(1)
-
 API_BASE_URL = "https://streamlink.cloud/api/"
-BUCKET_NAME = "streamlink-assets"
 D1_DB_NAME = "streamlink-db"
 BATCH_SIZE = 10
 TIMEOUT_SEC = 180 
 
-# 🚀 5.5 Hours limit in seconds (19,800 seconds)
+# Time limit guard to prevent GitHub Action timeouts
 MAX_RUNTIME_SEC = 5.75 * 3600
 ENGINE_START_TIME = time.time()
 
-headers = {
-    "Authorization": f"Bearer {BEARER_TOKEN}",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
-}
+# 🚀 THE MASTER SWITCH: Change this to "r2" to instantly route all traffic back to Cloudflare
+ACTIVE_STORAGE = os.environ.get("ACTIVE_STORAGE", "scaleway").lower()
 
 def log(message):
     """Helper to print messages with a precise timestamp"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {message}")
 
+# ==========================================
+# 2. MULTI-CLOUD STORAGE ADAPTERS
+# ==========================================
+# The beauty of S3 is that R2, Scaleway, and AWS all use the exact same language.
+# We create a blueprint (BaseStorage) and then specify the unique keys for each cloud.
+
+class BaseStorageAdapter:
+    def upload(self, local_path, s3_key, content_type):
+        """Uploads a file and returns the public CDN URL."""
+        raise NotImplementedError("Subclasses must implement the upload method.")
+
+class ScalewayAdapter(BaseStorageAdapter):
+    def __init__(self):
+        self.bucket = "streamlink-assets"
+        self.cdn_base = "https://streamlink-assets.s3.fr-par.scw.cloud"
+        
+        # Initialize Scaleway-specific Boto3 client
+        self.client = boto3.client(
+            "s3",
+            region_name="fr-par",
+            endpoint_url="https://s3.fr-par.scw.cloud",
+            aws_access_key_id=os.environ.get("SCW_ACCESS_KEY"),
+            aws_secret_access_key=os.environ.get("SCW_SECRET_KEY"),
+            config=Config(s3={"addressing_style": "virtual"})
+        )
+
+    def upload(self, local_path, s3_key, content_type):
+        # Scaleway requires "public-read" ACL so users can see the images
+        self.client.upload_file(
+            local_path, 
+            self.bucket, 
+            s3_key, 
+            ExtraArgs={"ContentType": content_type, "ACL": "public-read"}
+        )
+        return f"{self.cdn_base}/{s3_key}"
+
+class CloudflareR2Adapter(BaseStorageAdapter):
+    def __init__(self):
+        self.bucket = "streamlink-assets"
+        self.cdn_base = "https://cdn.streamlink.cloud" # Your custom R2 domain
+        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        
+        # Initialize Cloudflare-specific Boto3 client
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=os.environ.get("R2_ACCESS_KEY"),
+            aws_secret_access_key=os.environ.get("R2_SECRET_KEY")
+        )
+
+    def upload(self, local_path, s3_key, content_type):
+        # R2 handles public access at the bucket level, so no ACL needed
+        self.client.upload_file(
+            local_path, 
+            self.bucket, 
+            s3_key, 
+            ExtraArgs={"ContentType": content_type}
+        )
+        return f"{self.cdn_base}/{s3_key}"
+
+# 🚀 INITIALIZE THE CORRECT PROVIDER AUTOMATICALLY
+log(f"🌩️ Connecting to cloud provider: {ACTIVE_STORAGE.upper()}")
+if ACTIVE_STORAGE == "scaleway":
+    storage_engine = ScalewayAdapter()
+elif ACTIVE_STORAGE == "r2":
+    storage_engine = CloudflareR2Adapter()
+else:
+    log("❌ Invalid ACTIVE_STORAGE provider defined!")
+    exit(1)
+
+
+# ==========================================
+# 3. DATABASE UPDATE HELPER
+# ==========================================
 def update_db_status(target_url, name, status, poster_url=None):
     poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
     safe_name = name.replace("'", "''") 
@@ -44,51 +113,32 @@ def update_db_status(target_url, name, status, poster_url=None):
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
 
 # ==========================================
-# 2. CONTINUOUS ENGINE LOOP
+# 4. CONTINUOUS ENGINE LOOP
 # ==========================================
 log("🚀 Starting Continuous 6-Hour Preview Engine...")
+headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
 
 while True:
-    # 🛑 Time Guard: Check if we are near the 6-hour limit
     elapsed_time = time.time() - ENGINE_START_TIME
     if elapsed_time >= MAX_RUNTIME_SEC:
-        log("⏳ Reached 5.5-hour safety limit. Gracefully shutting down to cycle runner IP.")
+        log("⏳ Reached 5.5-hour safety limit. Gracefully shutting down.")
         exit(0)
 
     log(f"\n📥 Querying D1 for up to {BATCH_SIZE} pending videos...")
     fetch_sql = f"SELECT hash, target_url, name, size FROM global_assets WHERE preview_animation IS NULL AND (name LIKE '%.mp4' OR name LIKE '%.mkv' OR name LIKE '%.avi' OR name LIKE '%.webm') ORDER BY created_at DESC LIMIT {BATCH_SIZE};"
     
-    result = subprocess.run(
-        ["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], 
-        capture_output=True, text=True
-    )
+    result = subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], capture_output=True, text=True)
 
     try:
         raw_output = result.stdout.strip()
         json_start = raw_output.find('[') if '[' in raw_output else raw_output.find('{')
-        
-        if json_start != -1:
-            clean_json = raw_output[json_start:]
-            parsed_json = json.loads(clean_json)
-        else:
-            raise Exception("No JSON found in Wrangler output.")
-
-        if isinstance(parsed_json, list):
-            if "error" in parsed_json[0]:
-                raise Exception(f"D1 SQL Error: {parsed_json[0]['error']}")
-            pending_files = parsed_json[0].get("results", [])
-        else:
-            if "error" in parsed_json:
-                raise Exception(f"D1 SQL Error: {parsed_json['error']}")
-            pending_files = parsed_json.get("results", [])
-
+        parsed_json = json.loads(raw_output[json_start:]) if json_start != -1 else []
+        pending_files = parsed_json[0].get("results", []) if isinstance(parsed_json, list) else parsed_json.get("results", [])
     except Exception as e:
-        log(f"❌ Failed to parse D1 database output: {e}")
-        log(f"⚠️ RAW WRANGLER OUTPUT:\n{result.stdout}")
+        log(f"❌ Failed to parse D1 output: {e}")
         time.sleep(10)
         continue
 
-    # 💤 If queue is empty, sleep for 30 seconds and check again
     if not pending_files:
         log("✨ Queue is empty. Sleeping for 30 seconds...")
         time.sleep(30)
@@ -96,11 +146,7 @@ while True:
 
     log(f"🚀 Found {len(pending_files)} videos to process in this pass.")
 
-    # ==========================================
-    # 3. BATCH PROCESSING LOOP
-    # ==========================================
     for idx, file_record in enumerate(pending_files):
-        # Time Guard Check inside batch loop
         if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC:
             log("⏳ Mid-batch time limit hit. Shutting down safely...")
             exit(0)
@@ -111,98 +157,66 @@ while True:
         
         log(f"\n[{idx + 1}/{len(pending_files)}] Processing: {name}")
 
-        # Safe Hash Parsing
         raw_hash = str(file_record.get("hash", ""))
         if "urn:btih:" not in raw_hash or "||" not in raw_hash:
-            log(f"   ⚠️ WARNING: Skipping malformed hash for: {name}")
             update_db_status(target_url, name, "FAILED_MALFORMED_HASH")
             continue
             
         magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
-        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', name)
-        unique_file_id = f"{magnet_hash}_{safe_name}"
-
-        poster_file = "thumbnail.jpg"
-        preview_file = "preview.mp4"
+        unique_file_id = f"{magnet_hash}_{re.sub(r'[^a-zA-Z0-9]', '_', name)}"
+        poster_file, preview_file = "thumbnail.jpg", "preview.mp4"
         
         if os.path.exists(poster_file): os.remove(poster_file)
         if os.path.exists(preview_file): os.remove(preview_file)
 
         try:
-            # A. Resolve Direct Stream
-            encoded_url = urllib.parse.quote(target_url)
-            encoded_name = urllib.parse.quote(name)
-            api_url = f"{API_BASE_URL}?url={encoded_url}&action=play-direct&size={file_size}&fileName={encoded_name}"
-            
+            # 1. Resolve Direct URL
+            api_url = f"{API_BASE_URL}?url={urllib.parse.quote(target_url)}&action=play-direct&size={file_size}&fileName={urllib.parse.quote(name)}"
             req = urllib.request.Request(api_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode())
-            
-            if "url" not in data:
-                raise Exception("API did not return a stream URL.")
+            data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
             direct_url = data["url"]
 
-            # B. Probe Duration
-            probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", direct_url]
-            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
-            
-            raw_duration = probe_result.stdout.strip()
-            if not raw_duration:
-                 raise Exception(f"FFprobe could not read stream. Size: {file_size} bytes")
-                 
+            # 2. Get Video Duration
+            raw_duration = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", direct_url], capture_output=True, text=True, timeout=30).stdout.strip()
             duration = float(raw_duration)
-            log(f"   ⏱️ Duration: {duration}s")
-
-            # C. Short Video Logic (<120s)
-            cdn_poster = f"https://cdn.streamlink.cloud/thumbnails/{unique_file_id}_poster.jpg"
             
+            poster_key = f"thumbnails/{unique_file_id}_poster.jpg"
+            preview_key = f"thumbnails/{unique_file_id}_preview.mp4"
+
+            # 3. Short Videos (<120s) -> Thumbnail Only
             if duration < 120:
-                log("   ⏩ Video under 120s. Generating thumbnail only...")
+                log("   ⏩ Short video. Generating thumbnail only...")
                 subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", "-i", direct_url, "-frames:v", "1", "-f", "image2", "-vf", "scale=1280:-2:flags=lanczos", "-q:v", "2", poster_file], timeout=TIMEOUT_SEC, check=True)
                 
-                if not os.path.exists(poster_file) or os.path.getsize(poster_file) < 1024:
-                    raise Exception("Thumbnail generation failed (empty file).")
-                    
-                subprocess.run(["npx", "wrangler", "r2", "object", "put", f"{BUCKET_NAME}/thumbnails/{unique_file_id}_poster.jpg", "--file", f"./{poster_file}", "--remote"], stdout=subprocess.DEVNULL)
+                # ☁️ DYNAMIC UPLOAD: Uses whichever cloud is active!
+                cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster)
                 continue
 
-            # D. Standard Generation
+            # 4. Long Videos -> Standard Generation (Posters & MP4 Previews)
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
-            
             log("   ⚙️ Generating poster & preview animation...")
             subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t1), "-i", direct_url, "-frames:v", "1", "-f", "image2", "-vf", "scale=1280:-2:flags=lanczos", "-q:v", "2", poster_file], timeout=TIMEOUT_SEC, check=True)
             
-            ffmpeg_preview = [
+            subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
-                "-ss", str(t1), "-t", "1", "-i", direct_url,
-                "-ss", str(t2), "-t", "1", "-i", direct_url,
-                "-ss", str(t3), "-t", "1", "-i", direct_url,
-                "-ss", str(t4), "-t", "1", "-i", direct_url,
+                "-ss", str(t1), "-t", "1", "-i", direct_url, "-ss", str(t2), "-t", "1", "-i", direct_url,
+                "-ss", str(t3), "-t", "1", "-i", direct_url, "-ss", str(t4), "-t", "1", "-i", direct_url,
                 "-ss", str(t5), "-t", "1", "-i", direct_url,
                 "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=12,scale=640:-2:flags=lanczos[v]",
                 "-map", "[v]", "-c:v", "libx264", "-preset", "fast", "-an", preview_file
-            ]
-            subprocess.run(ffmpeg_preview, timeout=TIMEOUT_SEC, check=True)
+            ], timeout=TIMEOUT_SEC, check=True)
 
-            if not os.path.exists(preview_file) or os.path.getsize(preview_file) < 5000:
-                raise Exception("Preview generation failed or stream dropped.")
-
-            # E. Upload & Update
-            log("   ☁️ Pushing to R2 Edge...")
-            cdn_preview = f"https://cdn.streamlink.cloud/thumbnails/{unique_file_id}_preview.mp4"
-            subprocess.run(["npx", "wrangler", "r2", "object", "put", f"{BUCKET_NAME}/thumbnails/{unique_file_id}_poster.jpg", "--file", f"./{poster_file}", "--remote"], stdout=subprocess.DEVNULL)
-            subprocess.run(["npx", "wrangler", "r2", "object", "put", f"{BUCKET_NAME}/thumbnails/{unique_file_id}_preview.mp4", "--file", f"./{preview_file}", "--remote"], stdout=subprocess.DEVNULL)
+            # ☁️ DYNAMIC UPLOAD: Uses whichever cloud is active!
+            log("   ☁️ Pushing to Cloud Storage...")
+            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
+            cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
             
             update_db_status(target_url, name, cdn_preview, cdn_poster)
             log("   ✅ Success!")
 
-        except subprocess.TimeoutExpired:
-            log(f"   ⚠️ TIMEOUT: Stream hung for over {TIMEOUT_SEC} seconds.")
-            update_db_status(target_url, name, "FAILED_TIMEOUT")
         except Exception as e:
             log(f"   ❌ ERROR: {e}")
             update_db_status(target_url, name, "FAILED")
 
-    # Brief pause after completing a batch before asking D1 for the next 10
     time.sleep(2)
