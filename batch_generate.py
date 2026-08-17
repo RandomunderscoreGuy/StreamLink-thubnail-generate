@@ -2,6 +2,7 @@ import os
 import subprocess
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import time
 from datetime import datetime
@@ -10,7 +11,116 @@ import boto3
 from botocore.config import Config
 
 # ==========================================
-# 4. CONTINUOUS ENGINE LOOP
+# 1. HELPER FUNCTIONS & LOGGING
+# ==========================================
+def log(message):
+    """Helper to print messages with a precise timestamp"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {message}")
+
+# ==========================================
+# 2. CORE CONFIGURATION & HEADERS
+# ==========================================
+BEARER_TOKEN = os.environ.get("API_BEARER_TOKEN")
+API_BASE_URL = "https://streamlink.cloud/api/"
+D1_DB_NAME = "streamlink-db"
+BATCH_SIZE = 10
+TIMEOUT_SEC = 180 
+
+if not BEARER_TOKEN:
+    log("❌ API_BEARER_TOKEN missing from environment variables!")
+    exit(1)
+
+# Emulate standard browser headers to prevent Cloudflare WAF 403 blocks
+headers = {
+    "Authorization": f"Bearer {BEARER_TOKEN}",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9"
+}
+
+# Time limit guard to prevent GitHub Action runner timeouts
+MAX_RUNTIME_SEC = 5.75 * 3600
+ENGINE_START_TIME = time.time()
+
+# 🚀 THE MASTER SWITCH: Change this to "r2" to route traffic back to Cloudflare
+ACTIVE_STORAGE = os.environ.get("ACTIVE_STORAGE", "scaleway").lower()
+
+# ==========================================
+# 3. MULTI-CLOUD STORAGE ADAPTERS
+# ==========================================
+class BaseStorageAdapter:
+    def upload(self, local_path, s3_key, content_type):
+        raise NotImplementedError("Subclasses must implement the upload method.")
+
+class ScalewayAdapter(BaseStorageAdapter):
+    def __init__(self):
+        self.bucket = "streamlink-assets"
+        self.cdn_base = "https://streamlink-assets.s3.fr-par.scw.cloud"
+        
+        self.client = boto3.client(
+            "s3",
+            region_name="fr-par",
+            endpoint_url="https://s3.fr-par.scw.cloud",
+            aws_access_key_id=os.environ.get("SCW_ACCESS_KEY"),
+            aws_secret_access_key=os.environ.get("SCW_SECRET_KEY"),
+            config=Config(s3={"addressing_style": "virtual"})
+        )
+
+    def upload(self, local_path, s3_key, content_type):
+        self.client.upload_file(
+            local_path, 
+            self.bucket, 
+            s3_key, 
+            ExtraArgs={"ContentType": content_type, "ACL": "public-read"}
+        )
+        return f"{self.cdn_base}/{s3_key}"
+
+class CloudflareR2Adapter(BaseStorageAdapter):
+    def __init__(self):
+        self.bucket = "streamlink-assets"
+        self.cdn_base = "https://cdn.streamlink.cloud"
+        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=os.environ.get("R2_ACCESS_KEY"),
+            aws_secret_access_key=os.environ.get("R2_SECRET_KEY")
+        )
+
+    def upload(self, local_path, s3_key, content_type):
+        self.client.upload_file(
+            local_path, 
+            self.bucket, 
+            s3_key, 
+            ExtraArgs={"ContentType": content_type}
+        )
+        return f"{self.cdn_base}/{s3_key}"
+
+# Initialize active storage provider
+log(f"🌩️ Connecting to cloud provider: {ACTIVE_STORAGE.upper()}")
+if ACTIVE_STORAGE == "scaleway":
+    storage_engine = ScalewayAdapter()
+elif ACTIVE_STORAGE == "r2":
+    storage_engine = CloudflareR2Adapter()
+else:
+    log("❌ Invalid ACTIVE_STORAGE provider defined!")
+    exit(1)
+
+# ==========================================
+# 4. DATABASE UPDATE HELPER
+# ==========================================
+def update_db_status(target_url, name, status, poster_url=None):
+    poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
+    safe_name = name.replace("'", "''") 
+    safe_target = target_url.replace("'", "''") 
+    
+    sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}' WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
+    subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
+
+# ==========================================
+# 5. CONTINUOUS ENGINE LOOP
 # ==========================================
 log("🚀 Starting Continuous 6-Hour Preview Engine...")
 
@@ -66,7 +176,7 @@ while True:
         if os.path.exists(preview_file): os.remove(preview_file)
 
         try:
-            # 1. Resolve Direct URL (uses the correct headers from Section 1)
+            # 1. Resolve Direct URL
             api_url = f"{API_BASE_URL}?url={urllib.parse.quote(target_url)}&action=play-direct&size={file_size}&fileName={urllib.parse.quote(name)}"
             req = urllib.request.Request(api_url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -99,8 +209,10 @@ while True:
             
             subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
-                "-ss", str(t1), "-t", "1", "-i", direct_url, "-ss", str(t2), "-t", "1", "-i", direct_url,
-                "-ss", str(t3), "-t", "1", "-i", direct_url, "-ss", str(t4), "-t", "1", "-i", direct_url,
+                "-ss", str(t1), "-t", "1", "-i", direct_url,
+                "-ss", str(t2), "-t", "1", "-i", direct_url,
+                "-ss", str(t3), "-t", "1", "-i", direct_url,
+                "-ss", str(t4), "-t", "1", "-i", direct_url,
                 "-ss", str(t5), "-t", "1", "-i", direct_url,
                 "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=12,scale=640:-2:flags=lanczos[v]",
                 "-map", "[v]", "-c:v", "libx264", "-preset", "fast", "-an", preview_file
