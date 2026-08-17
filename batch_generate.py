@@ -56,7 +56,8 @@ class BaseStorageAdapter:
 class ScalewayAdapter(BaseStorageAdapter):
     def __init__(self):
         self.bucket = "streamlink-assets"
-        self.cdn_base = "https://streamlink-assets.s3.fr-par.scw.cloud"
+        # 🟢 CHANGED: Now outputs your custom domain
+        self.cdn_base = "https://cdn.streamlink.cloud" 
         
         self.client = boto3.client(
             "s3",
