@@ -10,121 +10,9 @@ import boto3
 from botocore.config import Config
 
 # ==========================================
-# 1. CORE CONFIGURATION & HEADERS
-# ==========================================
-BEARER_TOKEN = os.environ.get("API_BEARER_TOKEN")
-API_BASE_URL = "https://streamlink.cloud/api/"
-D1_DB_NAME = "streamlink-db"
-BATCH_SIZE = 10
-TIMEOUT_SEC = 180 
-
-# Emulate standard browser headers to avoid Cloudflare WAF 403 blocks
-headers = {
-    "Authorization": f"Bearer {BEARER_TOKEN}",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9"
-}
-
-# Time limit guard to prevent GitHub Action timeouts
-MAX_RUNTIME_SEC = 5.75 * 3600
-ENGINE_START_TIME = time.time()
-
-# 🚀 THE MASTER SWITCH: Change this to "r2" to instantly route all traffic back to Cloudflare
-ACTIVE_STORAGE = os.environ.get("ACTIVE_STORAGE", "scaleway").lower()
-
-def log(message):
-    """Helper to print messages with a precise timestamp"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] {message}")
-
-# ==========================================
-# 2. MULTI-CLOUD STORAGE ADAPTERS
-# ==========================================
-# The beauty of S3 is that R2, Scaleway, and AWS all use the exact same language.
-# We create a blueprint (BaseStorage) and then specify the unique keys for each cloud.
-
-class BaseStorageAdapter:
-    def upload(self, local_path, s3_key, content_type):
-        """Uploads a file and returns the public CDN URL."""
-        raise NotImplementedError("Subclasses must implement the upload method.")
-
-class ScalewayAdapter(BaseStorageAdapter):
-    def __init__(self):
-        self.bucket = "streamlink-assets"
-        self.cdn_base = "https://streamlink-assets.s3.fr-par.scw.cloud"
-        
-        # Initialize Scaleway-specific Boto3 client
-        self.client = boto3.client(
-            "s3",
-            region_name="fr-par",
-            endpoint_url="https://s3.fr-par.scw.cloud",
-            aws_access_key_id=os.environ.get("SCW_ACCESS_KEY"),
-            aws_secret_access_key=os.environ.get("SCW_SECRET_KEY"),
-            config=Config(s3={"addressing_style": "virtual"})
-        )
-
-    def upload(self, local_path, s3_key, content_type):
-        # Scaleway requires "public-read" ACL so users can see the images
-        self.client.upload_file(
-            local_path, 
-            self.bucket, 
-            s3_key, 
-            ExtraArgs={"ContentType": content_type, "ACL": "public-read"}
-        )
-        return f"{self.cdn_base}/{s3_key}"
-
-class CloudflareR2Adapter(BaseStorageAdapter):
-    def __init__(self):
-        self.bucket = "streamlink-assets"
-        self.cdn_base = "https://cdn.streamlink.cloud" # Your custom R2 domain
-        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-        
-        # Initialize Cloudflare-specific Boto3 client
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
-            aws_access_key_id=os.environ.get("R2_ACCESS_KEY"),
-            aws_secret_access_key=os.environ.get("R2_SECRET_KEY")
-        )
-
-    def upload(self, local_path, s3_key, content_type):
-        # R2 handles public access at the bucket level, so no ACL needed
-        self.client.upload_file(
-            local_path, 
-            self.bucket, 
-            s3_key, 
-            ExtraArgs={"ContentType": content_type}
-        )
-        return f"{self.cdn_base}/{s3_key}"
-
-# 🚀 INITIALIZE THE CORRECT PROVIDER AUTOMATICALLY
-log(f"🌩️ Connecting to cloud provider: {ACTIVE_STORAGE.upper()}")
-if ACTIVE_STORAGE == "scaleway":
-    storage_engine = ScalewayAdapter()
-elif ACTIVE_STORAGE == "r2":
-    storage_engine = CloudflareR2Adapter()
-else:
-    log("❌ Invalid ACTIVE_STORAGE provider defined!")
-    exit(1)
-
-
-# ==========================================
-# 3. DATABASE UPDATE HELPER
-# ==========================================
-def update_db_status(target_url, name, status, poster_url=None):
-    poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
-    safe_name = name.replace("'", "''") 
-    safe_target = target_url.replace("'", "''") 
-    
-    sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}' WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
-    subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
-
-# ==========================================
 # 4. CONTINUOUS ENGINE LOOP
 # ==========================================
 log("🚀 Starting Continuous 6-Hour Preview Engine...")
-headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
 
 while True:
     elapsed_time = time.time() - ENGINE_START_TIME
@@ -178,11 +66,15 @@ while True:
         if os.path.exists(preview_file): os.remove(preview_file)
 
         try:
-            # 1. Resolve Direct URL
+            # 1. Resolve Direct URL (uses the correct headers from Section 1)
             api_url = f"{API_BASE_URL}?url={urllib.parse.quote(target_url)}&action=play-direct&size={file_size}&fileName={urllib.parse.quote(name)}"
             req = urllib.request.Request(api_url, headers=headers)
-            data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
-            direct_url = data["url"]
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+                
+            direct_url = data.get("url")
+            if not direct_url:
+                raise Exception("API response missing 'url' key.")
 
             # 2. Get Video Duration
             raw_duration = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", direct_url], capture_output=True, text=True, timeout=30).stdout.strip()
@@ -196,7 +88,6 @@ while True:
                 log("   ⏩ Short video. Generating thumbnail only...")
                 subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", "-i", direct_url, "-frames:v", "1", "-f", "image2", "-vf", "scale=1280:-2:flags=lanczos", "-q:v", "2", poster_file], timeout=TIMEOUT_SEC, check=True)
                 
-                # ☁️ DYNAMIC UPLOAD: Uses whichever cloud is active!
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster)
                 continue
@@ -215,7 +106,7 @@ while True:
                 "-map", "[v]", "-c:v", "libx264", "-preset", "fast", "-an", preview_file
             ], timeout=TIMEOUT_SEC, check=True)
 
-            # ☁️ DYNAMIC UPLOAD: Uses whichever cloud is active!
+            # 5. Dynamic Upload to Active Storage Provider
             log("   ☁️ Pushing to Cloud Storage...")
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
             cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
@@ -223,6 +114,10 @@ while True:
             update_db_status(target_url, name, cdn_preview, cdn_poster)
             log("   ✅ Success!")
 
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='ignore')
+            log(f"   ❌ HTTP ERROR {e.code}: {e.reason} | Body: {error_body[:200]}")
+            update_db_status(target_url, name, f"FAILED_HTTP_{e.code}")
         except Exception as e:
             log(f"   ❌ ERROR: {e}")
             update_db_status(target_url, name, "FAILED")
