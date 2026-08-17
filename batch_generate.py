@@ -10,13 +10,21 @@ import boto3
 from botocore.config import Config
 
 # ==========================================
-# 1. CORE CONFIGURATION
+# 1. CORE CONFIGURATION & HEADERS
 # ==========================================
 BEARER_TOKEN = os.environ.get("API_BEARER_TOKEN")
 API_BASE_URL = "https://streamlink.cloud/api/"
 D1_DB_NAME = "streamlink-db"
 BATCH_SIZE = 10
 TIMEOUT_SEC = 180 
+
+# Emulate standard browser headers to avoid Cloudflare WAF 403 blocks
+headers = {
+    "Authorization": f"Bearer {BEARER_TOKEN}",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9"
+}
 
 # Time limit guard to prevent GitHub Action timeouts
 MAX_RUNTIME_SEC = 5.75 * 3600
