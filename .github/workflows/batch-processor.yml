@@ -28,10 +28,19 @@ jobs:
       - name: Install Cloudflare Wrangler
         run: npm install -g wrangler
 
-      - name: Run Python Batch Processor
+      - name: Install Python Dependencies
+        run: pip install boto3
+
+      - name: Run Multi-Cloud Batch Processor
         env:
+          ACTIVE_STORAGE: "scaleway" 
           API_BEARER_TOKEN: ${{ secrets.API_BEARER_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+          SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+          # Keep R2 keys here so you can swap instantly later
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }} 
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
         run: |
           python3 -u batch_generate.py
