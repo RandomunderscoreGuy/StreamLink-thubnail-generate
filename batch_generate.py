@@ -43,7 +43,7 @@ headers = {
 MAX_RUNTIME_SEC = 5.75 * 3600
 ENGINE_START_TIME = time.time()
 
-# 🚀 THE MASTER SWITCH: Change this to "r2" to route traffic back to Cloudflare
+# 🚀 THE MASTER SWITCH
 ACTIVE_STORAGE = os.environ.get("ACTIVE_STORAGE", "scaleway").lower()
 
 # ==========================================
@@ -56,8 +56,8 @@ class BaseStorageAdapter:
 class ScalewayAdapter(BaseStorageAdapter):
     def __init__(self):
         self.bucket = "streamlink-assets"
-        # 🟢 CHANGED: Now outputs your custom domain
-        self.cdn_base = "https://cdn.streamlink.cloud" 
+        # 🟢 UPDATED: Points to your new isolated subdomain
+        self.cdn_base = "https://media.streamlink.cloud" 
         
         self.client = boto3.client(
             "s3",
@@ -123,7 +123,7 @@ def update_db_status(target_url, name, status, poster_url=None):
 # ==========================================
 # 5. CONTINUOUS ENGINE LOOP
 # ==========================================
-log("🚀 Starting Continuous 6-Hour Preview Engine...")
+log("🚀 Starting Continuous 6-Hour Preview Engine (WebP Edition)...")
 
 while True:
     elapsed_time = time.time() - ENGINE_START_TIME
@@ -171,7 +171,9 @@ while True:
             
         magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
         unique_file_id = f"{magnet_hash}_{re.sub(r'[^a-zA-Z0-9]', '_', name)}"
-        poster_file, preview_file = "thumbnail.jpg", "preview.mp4"
+        
+        # 🟢 UPDATED: Using .webp formats locally
+        poster_file, preview_file = "thumbnail.webp", "preview.webp"
         
         if os.path.exists(poster_file): os.remove(poster_file)
         if os.path.exists(preview_file): os.remove(preview_file)
@@ -191,23 +193,27 @@ while True:
             raw_duration = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", direct_url], capture_output=True, text=True, timeout=30).stdout.strip()
             duration = float(raw_duration)
             
-            poster_key = f"thumbnails/{unique_file_id}_poster.jpg"
-            preview_key = f"thumbnails/{unique_file_id}_preview.mp4"
+            # 🟢 UPDATED: Saving to S3 with .webp extensions
+            poster_key = f"thumbnails/{unique_file_id}_poster.webp"
+            preview_key = f"thumbnails/{unique_file_id}_preview.webp"
 
             # 3. Short Videos (<120s) -> Thumbnail Only
             if duration < 120:
-                log("   ⏩ Short video. Generating thumbnail only...")
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", "-i", direct_url, "-frames:v", "1", "-f", "image2", "-vf", "scale=1280:-2:flags=lanczos", "-q:v", "2", poster_file], timeout=TIMEOUT_SEC, check=True)
+                log("   ⏩ Short video. Generating WebP thumbnail only...")
+                subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", "-i", direct_url, "-frames:v", "1", "-c:v", "libwebp", "-q:v", "80", "-vf", "scale=1280:-2:flags=lanczos", poster_file], timeout=TIMEOUT_SEC, check=True)
                 
-                cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
+                cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster)
                 continue
 
-            # 4. Long Videos -> Standard Generation (Posters & MP4 Previews)
+            # 4. Long Videos -> Standard Generation (Static & Animated WebP)
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
-            log("   ⚙️ Generating poster & preview animation...")
-            subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t1), "-i", direct_url, "-frames:v", "1", "-f", "image2", "-vf", "scale=1280:-2:flags=lanczos", "-q:v", "2", poster_file], timeout=TIMEOUT_SEC, check=True)
+            log("   ⚙️ Generating WebP poster & animated preview...")
             
+            # 🟢 UPDATED: Static WebP Generator
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t1), "-i", direct_url, "-frames:v", "1", "-c:v", "libwebp", "-q:v", "80", "-vf", "scale=1280:-2:flags=lanczos", poster_file], timeout=TIMEOUT_SEC, check=True)
+            
+            # 🟢 UPDATED: Animated WebP Generator
             subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
                 "-ss", str(t1), "-t", "1", "-i", direct_url,
@@ -216,13 +222,13 @@ while True:
                 "-ss", str(t4), "-t", "1", "-i", direct_url,
                 "-ss", str(t5), "-t", "1", "-i", direct_url,
                 "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=12,scale=640:-2:flags=lanczos[v]",
-                "-map", "[v]", "-c:v", "libx264", "-preset", "fast", "-an", preview_file
+                "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "70", "-an", preview_file
             ], timeout=TIMEOUT_SEC, check=True)
 
-            # 5. Dynamic Upload to Active Storage Provider
-            log("   ☁️ Pushing to Cloud Storage...")
-            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
-            cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
+            # 5. Dynamic Upload
+            log("   ☁️ Pushing WebP assets to Cloud Storage...")
+            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
+            cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "image/webp")
             
             update_db_status(target_url, name, cdn_preview, cdn_poster)
             log("   ✅ Success!")
