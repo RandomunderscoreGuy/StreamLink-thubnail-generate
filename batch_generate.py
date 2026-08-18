@@ -63,10 +63,10 @@ class ScalewayAdapter(BaseStorageAdapter):
         return f"{self.cdn_base}/{s3_key}"
 
 log(f"🌩️ Connecting to cloud provider: {ACTIVE_STORAGE.upper()}")
-storage_engine = ScalewayAdapter() # Hardcoded for safety based on your current setup
+storage_engine = ScalewayAdapter()
 
 # ==========================================
-# 4. DATABASE UPDATE HELPER (UPGRADED)
+# 4. DATABASE UPDATE HELPER
 # ==========================================
 def update_db_status(target_url, name, status, poster_url=None, duration=0, res="NULL", codec="NULL", audio=2, is_hdr=0):
     poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
@@ -92,10 +92,12 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
 # ==========================================
 # 5. CONTINUOUS ENGINE LOOP
 # ==========================================
-log("🚀 Starting Continuous 6-Hour Preview Engine (Metadata Edition)...")
+log("🚀 Starting Continuous 6-Hour Preview Engine (Optimized WebP Edition)...")
 
 while True:
-    if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: exit(0)
+    if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
+        log("⏳ Safety time limit reached. Gracefully exiting.")
+        exit(0)
 
     fetch_sql = f"SELECT hash, target_url, name, size FROM global_assets WHERE preview_animation IS NULL AND (name LIKE '%.mp4' OR name LIKE '%.mkv' OR name LIKE '%.avi' OR name LIKE '%.webm') ORDER BY created_at DESC LIMIT {BATCH_SIZE};"
     result = subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], capture_output=True, text=True)
@@ -110,11 +112,15 @@ while True:
         continue
 
     if not pending_files:
+        log("✨ Queue is empty. Sleeping for 30 seconds...")
         time.sleep(30)
         continue
 
+    log(f"🚀 Found {len(pending_files)} videos to process in this pass.")
+
     for idx, file_record in enumerate(pending_files):
-        if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: exit(0)
+        if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
+            exit(0)
 
         name = file_record["name"]
         target_url = file_record["target_url"]
@@ -140,6 +146,9 @@ while True:
             with urllib.request.urlopen(req, timeout=30) as response:
                 direct_url = json.loads(response.read().decode()).get("url")
 
+            if not direct_url:
+                raise Exception("API response missing 'url' key.")
+
             # 2. 🚀 ADVANCED METADATA EXTRACTION
             ffprobe_cmd = [
                 "ffprobe", "-v", "error", 
@@ -159,7 +168,7 @@ while True:
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
             
-# Logic parsing (Upgraded for Cinematic Aspect Ratios)
+            # Logic parsing (Supports Cinematic Aspect Ratios)
             if width >= 7600 or height >= 4320: 
                 resolution = "8K"
             elif width >= 3800 or height >= 2160: 
@@ -173,23 +182,40 @@ while True:
 
             is_hdr = 1 if color in ['smpte2084', 'arib-std-b67'] else 0
             hdr_badge = " HDR" if is_hdr else ""
-            audio_badge = " 5.1+" if audio_channels >= 6 else ""
+            audio_badge = f" | Audio: {audio_channels}ch" if audio_channels else ""
 
-            log(f"   📊 Found: {resolution}{hdr_badge} | {codec} | Audio: {audio_channels}ch | {int(duration)}s")
+            log(f"   📊 Found: {resolution}{hdr_badge} | {codec}{audio_badge} | {int(duration)}s")
 
             poster_key = f"thumbnails/{unique_file_id}_poster.webp"
             preview_key = f"thumbnails/{unique_file_id}_preview.webp"
 
-            # 3. Short Videos (<120s) -> Thumbnail Only
+            # 3. Short Videos (<120s) -> Lightweight Poster Only (800px, Quality 65)
             if duration < 120:
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", "-i", direct_url, "-frames:v", "1", "-c:v", "libwebp", "-q:v", "80", "-vf", "scale=1280:-2:flags=lanczos", poster_file], timeout=TIMEOUT_SEC, check=True)
+                log("   ⏩ Short video. Generating optimized poster only...")
+                subprocess.run([
+                    "ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", 
+                    "-i", direct_url, "-frames:v", "1", 
+                    "-c:v", "libwebp", "-q:v", "65", 
+                    "-vf", "scale=800:-2:flags=lanczos", poster_file
+                ], timeout=TIMEOUT_SEC, check=True)
+                
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 continue
 
-            # 4. Long Videos -> Standard WebP Generation
+            # 4. Long Videos -> Lightweight Static Poster & Animated Preview
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
-            subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t1), "-i", direct_url, "-frames:v", "1", "-c:v", "libwebp", "-q:v", "80", "-vf", "scale=1280:-2:flags=lanczos", poster_file], timeout=TIMEOUT_SEC, check=True)
+            log("   ⚙️ Generating optimized WebP assets...")
+            
+            # Optimized Static Poster (800px width, 65 quality ~30-50KB)
+            subprocess.run([
+                "ffmpeg", "-y", "-v", "error", "-ss", str(t1), 
+                "-i", direct_url, "-frames:v", "1", 
+                "-c:v", "libwebp", "-q:v", "65", 
+                "-vf", "scale=800:-2:flags=lanczos", poster_file
+            ], timeout=TIMEOUT_SEC, check=True)
+            
+            # Optimized Animated WebP (480px width, 8 fps, 50 quality ~80-160KB)
             subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
                 "-ss", str(t1), "-t", "1", "-i", direct_url,
@@ -197,16 +223,21 @@ while True:
                 "-ss", str(t3), "-t", "1", "-i", direct_url,
                 "-ss", str(t4), "-t", "1", "-i", direct_url,
                 "-ss", str(t5), "-t", "1", "-i", direct_url,
-                "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=12,scale=640:-2:flags=lanczos[v]",
-                "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "70", "-an", preview_file
+                "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=8,scale=480:-2:flags=lanczos[v]",
+                "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "50", "-an", preview_file
             ], timeout=TIMEOUT_SEC, check=True)
 
+            log("   ☁️ Uploading optimized WebP files to Scaleway...")
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
             cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "image/webp")
             
             update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
             log("   ✅ Upload & DB Update Complete!")
 
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8', errors='ignore')
+            log(f"   ❌ HTTP ERROR {e.code}: {e.reason} | Body: {error_body[:200]}")
+            update_db_status(target_url, name, f"FAILED_HTTP_{e.code}")
         except Exception as e:
             log(f"   ❌ ERROR: {e}")
             update_db_status(target_url, name, "FAILED")
