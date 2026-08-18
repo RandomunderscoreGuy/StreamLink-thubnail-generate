@@ -159,12 +159,17 @@ while True:
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
             
-            # Logic parsing
-            if height >= 4320: resolution = "8K"
-            elif height >= 2160: resolution = "4K"
-            elif height >= 1080: resolution = "1080p"
-            elif height >= 720: resolution = "720p"
-            else: resolution = "480p"
+# Logic parsing (Upgraded for Cinematic Aspect Ratios)
+            if width >= 7600 or height >= 4320: 
+                resolution = "8K"
+            elif width >= 3800 or height >= 2160: 
+                resolution = "4K"
+            elif width >= 1900 or height >= 1080: 
+                resolution = "1080p"
+            elif width >= 1200 or height >= 720: 
+                resolution = "720p"
+            else: 
+                resolution = "480p"
 
             is_hdr = 1 if color in ['smpte2084', 'arib-std-b67'] else 0
             hdr_badge = " HDR" if is_hdr else ""
