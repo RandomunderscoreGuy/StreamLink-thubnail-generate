@@ -116,7 +116,7 @@ while True:
         time.sleep(30)
         continue
 
-    log(f"🚀 Found {len(pending_files)} videos to process in this pass.")
+    log(f"🚀 Found {len(pending_files)} files to process in this pass.")
 
     for idx, file_record in enumerate(pending_files):
         if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
@@ -126,6 +126,13 @@ while True:
         target_url = file_record["target_url"]
         file_size = file_record["size"]
         log(f"\n[{idx + 1}/{len(pending_files)}] Processing: {name}")
+
+        # 🚀 THE BOUNCER: Instantly skip and tag non-video files
+        valid_video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.webm', '.wmv')
+        if not name.lower().endswith(valid_video_exts):
+            log("   ⏩ Not a video file. Tagging as SKIPPED_NON_VIDEO...")
+            update_db_status(target_url, name, "SKIPPED_NON_VIDEO")
+            continue
 
         raw_hash = str(file_record.get("hash", ""))
         if "urn:btih:" not in raw_hash or "||" not in raw_hash:
