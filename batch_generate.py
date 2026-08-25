@@ -149,9 +149,10 @@ while True:
             if not direct_url:
                 raise Exception("API response missing 'url' key.")
 
-            # 2. 🚀 ADVANCED METADATA EXTRACTION
+            # 2. 🚀 ADVANCED METADATA EXTRACTION (Disguised as Chrome)
             ffprobe_cmd = [
                 "ffprobe", "-v", "error", 
+                "-user_agent", headers["User-Agent"], # 🚀 THE FIX: Bypass CDN bot-blockers
                 "-show_entries", "stream=codec_type,width,height,codec_name,color_transfer,channels:format=duration", 
                 "-of", "json", direct_url
             ]
@@ -168,7 +169,6 @@ while True:
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
             
-            # Logic parsing (Supports Cinematic Aspect Ratios)
             if width >= 7600 or height >= 4320: 
                 resolution = "8K"
             elif width >= 3800 or height >= 2160: 
@@ -189,11 +189,14 @@ while True:
             poster_key = f"thumbnails/{unique_file_id}_poster.webp"
             preview_key = f"thumbnails/{unique_file_id}_preview.webp"
 
+            # 🚀 THE FIX: Wait 1 second to prevent HTTP 429 Too Many Requests on TorBox CDN
+            time.sleep(1) 
+
             # 3. Short Videos (<120s) -> Lightweight Poster Only (800px, Quality 65)
             if duration < 120:
                 log("   ⏩ Short video. Generating optimized poster only...")
                 subprocess.run([
-                    "ffmpeg", "-y", "-v", "error", "-ss", "00:00:01", 
+                    "ffmpeg", "-y", "-v", "error", "-user_agent", headers["User-Agent"], "-ss", "00:00:01", 
                     "-i", direct_url, "-frames:v", "1", 
                     "-c:v", "libwebp", "-q:v", "65", 
                     "-vf", "scale=800:-2:flags=lanczos", poster_file
@@ -207,22 +210,22 @@ while True:
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
             log("   ⚙️ Generating optimized WebP assets...")
             
-            # Optimized Static Poster (800px width, 65 quality ~30-50KB)
+            # Optimized Static Poster
             subprocess.run([
-                "ffmpeg", "-y", "-v", "error", "-ss", str(t1), 
+                "ffmpeg", "-y", "-v", "error", "-user_agent", headers["User-Agent"], "-ss", str(t1), 
                 "-i", direct_url, "-frames:v", "1", 
                 "-c:v", "libwebp", "-q:v", "65", 
                 "-vf", "scale=800:-2:flags=lanczos", poster_file
             ], timeout=TIMEOUT_SEC, check=True)
             
-            # Optimized Animated WebP (480px width, 8 fps, 50 quality ~80-160KB)
+            # Optimized Animated WebP (Pass User-Agent to EVERY input stream)
             subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
-                "-ss", str(t1), "-t", "1", "-i", direct_url,
-                "-ss", str(t2), "-t", "1", "-i", direct_url,
-                "-ss", str(t3), "-t", "1", "-i", direct_url,
-                "-ss", str(t4), "-t", "1", "-i", direct_url,
-                "-ss", str(t5), "-t", "1", "-i", direct_url,
+                "-user_agent", headers["User-Agent"], "-ss", str(t1), "-t", "1", "-i", direct_url,
+                "-user_agent", headers["User-Agent"], "-ss", str(t2), "-t", "1", "-i", direct_url,
+                "-user_agent", headers["User-Agent"], "-ss", str(t3), "-t", "1", "-i", direct_url,
+                "-user_agent", headers["User-Agent"], "-ss", str(t4), "-t", "1", "-i", direct_url,
+                "-user_agent", headers["User-Agent"], "-ss", str(t5), "-t", "1", "-i", direct_url,
                 "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=8,scale=480:-2:flags=lanczos[v]",
                 "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "50", "-an", preview_file
             ], timeout=TIMEOUT_SEC, check=True)
