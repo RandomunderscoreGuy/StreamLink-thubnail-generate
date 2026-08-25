@@ -101,7 +101,8 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
-log("🔍 Querying D1 database for pending files...")
+    # 👇 MUST BE INDENTED 4 SPACES INSIDE THE WHILE LOOP 👇
+    log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"""
         SELECT hash, target_url, name, size 
         FROM global_assets 
@@ -109,8 +110,9 @@ log("🔍 Querying D1 database for pending files...")
         ORDER BY created_at DESC 
         LIMIT {BATCH_SIZE};
     """
-    result = subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], capture_output=True, text=True)
+    # 👆 MUST BE INDENTED 4 SPACES INSIDE THE WHILE LOOP 👆
 
+    result = subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], capture_output=True, text=True)
     try:
         raw_output = result.stdout.strip()
         if result.returncode != 0 or not raw_output:
