@@ -88,13 +88,37 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
 # ==========================================
 log("🚀 Starting Continuous 6-Hour Preview Engine (Optimized WebP Edition)...")
 
+FFMPEG_NET_FLAGS = [
+    "-user_agent", headers["User-Agent"],
+    "-reconnect", "1",
+    "-reconnect_at_eof", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5"
+]
+
 while True:
     if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
     log("🔍 Querying D1 database for pending files...")
-    fetch_sql = f"SELECT hash, target_url, name, size FROM global_assets WHERE preview_animation IS NULL ORDER BY created_at DESC LIMIT {BATCH_SIZE};"
+    fetch_sql = f"""
+        SELECT hash, target_url, name, size 
+        FROM global_assets 
+        WHERE preview_animation IS NULL 
+          AND (
+            LOWER(name) LIKE '%.mp4' OR 
+            LOWER(name) LIKE '%.mkv' OR 
+            LOWER(name) LIKE '%.avi' OR 
+            LOWER(name) LIKE '%.mov' OR 
+            LOWER(name) LIKE '%.m4v' OR 
+            LOWER(name) LIKE '%.flv' OR 
+            LOWER(name) LIKE '%.webm' OR 
+            LOWER(name) LIKE '%.wmv'
+          )
+        ORDER BY created_at DESC 
+        LIMIT {BATCH_SIZE};
+    """
     result = subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], capture_output=True, text=True)
 
     try:
@@ -117,7 +141,7 @@ while True:
         time.sleep(30)
         continue
 
-    log(f"📦 Found {len(pending_files)} item(s) in queue.")
+    log(f"📦 Found {len(pending_files)} video(s) in queue.")
 
     for idx, file_record in enumerate(pending_files):
         if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
@@ -127,23 +151,7 @@ while True:
         target_url = file_record["target_url"]
         file_size = file_record["size"]
 
-        # Tag non-video files with a quick log
-        valid_video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.webm', '.wmv')
-        if not name.lower().endswith(valid_video_exts):
-            log(f"⏩ Skipping non-video: {name}")
-            update_db_status(target_url, name, "SKIPPED_NON_VIDEO")
-            continue
-
         log(f"\n[{idx + 1}/{len(pending_files)}] 🎬 Processing: {name}")
-
-        # 🚀 THE BOUNCER: Instantly skip and tag non-video files SILENTLY
-        valid_video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.webm', '.wmv')
-        if not name.lower().endswith(valid_video_exts):
-            update_db_status(target_url, name, "SKIPPED_NON_VIDEO")
-            continue
-
-        # 👇 ONLY log if it actually passes the bouncer and is a real video!
-        log(f"\n[{idx + 1}/{len(pending_files)}] Processing: {name}")
 
         raw_hash = str(file_record.get("hash", ""))
         if "urn:btih:" not in raw_hash or "||" not in raw_hash:
@@ -167,17 +175,17 @@ while True:
             if not direct_url:
                 raise Exception("API response missing 'url' key.")
 
-            # 2. 🚀 ADVANCED METADATA EXTRACTION (Disguised as Chrome)
+            # 2. Advanced Metadata Extraction
             ffprobe_cmd = [
                 "ffprobe", "-v", "error", 
-                "-user_agent", headers["User-Agent"], # 🚀 THE FIX: Bypass CDN bot-blockers
+                *FFMPEG_NET_FLAGS,
                 "-show_entries", "stream=codec_type,width,height,codec_name,color_transfer,channels:format=duration", 
                 "-of", "json", direct_url
             ]
             probe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
-            probe_data = json.loads(probe_result.stdout)
+            probe_data = json.loads(probe_result.stdout) if probe_result.stdout else {}
             
-            duration = float(probe_data.get('format', {}).get('duration', 0))
+            duration = float(probe_data.get('format', {}).get('duration', 0) or 0)
             v_stream = next((s for s in probe_data.get('streams', []) if s.get('codec_type') == 'video'), {})
             a_stream = next((s for s in probe_data.get('streams', []) if s.get('codec_type') == 'audio'), {})
 
@@ -187,6 +195,12 @@ while True:
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
             
+            # Guard for completely broken or unready files
+            if (duration <= 0 and codec == 'UNKNOWN') or width == 0:
+                log("   ⚠️ Stream unreadable or still downloading on CDN. Marking for retry...")
+                update_db_status(target_url, name, "FAILED_UNREADABLE_OR_DOWNLOADING")
+                continue
+
             if width >= 7600 or height >= 4320: 
                 resolution = "8K"
             elif width >= 3800 or height >= 2160: 
@@ -207,14 +221,16 @@ while True:
             poster_key = f"thumbnails/{unique_file_id}_poster.webp"
             preview_key = f"thumbnails/{unique_file_id}_preview.webp"
 
-            # 🚀 THE FIX: Wait 1 second to prevent HTTP 429 Too Many Requests on TorBox CDN
-            time.sleep(1) 
+            time.sleep(1)
 
-            # 3. Short Videos (<120s) -> Lightweight Poster Only (800px, Quality 65)
+            # 3. Short Videos (<120s) -> Poster Only
             if duration < 120:
                 log("   ⏩ Short video. Generating optimized poster only...")
+                seek_time = "00:00:00" if duration <= 1 else "00:00:01"
                 subprocess.run([
-                    "ffmpeg", "-y", "-v", "error", "-user_agent", headers["User-Agent"], "-ss", "00:00:01", 
+                    "ffmpeg", "-y", "-v", "error",
+                    *FFMPEG_NET_FLAGS,
+                    "-ss", seek_time, 
                     "-i", direct_url, "-frames:v", "1", 
                     "-c:v", "libwebp", "-q:v", "65", 
                     "-vf", "scale=800:-2:flags=lanczos", poster_file
@@ -224,26 +240,28 @@ while True:
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 continue
 
-            # 4. Long Videos -> Lightweight Static Poster & Animated Preview
+            # 4. Long Videos -> Poster & Animated Preview
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
             log("   ⚙️ Generating optimized WebP assets...")
             
-            # Optimized Static Poster
+            # Static Poster
             subprocess.run([
-                "ffmpeg", "-y", "-v", "error", "-user_agent", headers["User-Agent"], "-ss", str(t1), 
+                "ffmpeg", "-y", "-v", "error",
+                *FFMPEG_NET_FLAGS,
+                "-ss", str(t1), 
                 "-i", direct_url, "-frames:v", "1", 
                 "-c:v", "libwebp", "-q:v", "65", 
                 "-vf", "scale=800:-2:flags=lanczos", poster_file
             ], timeout=TIMEOUT_SEC, check=True)
             
-            # Optimized Animated WebP (Pass User-Agent to EVERY input stream)
+            # Animated WebP Preview
             subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
-                "-user_agent", headers["User-Agent"], "-ss", str(t1), "-t", "1", "-i", direct_url,
-                "-user_agent", headers["User-Agent"], "-ss", str(t2), "-t", "1", "-i", direct_url,
-                "-user_agent", headers["User-Agent"], "-ss", str(t3), "-t", "1", "-i", direct_url,
-                "-user_agent", headers["User-Agent"], "-ss", str(t4), "-t", "1", "-i", direct_url,
-                "-user_agent", headers["User-Agent"], "-ss", str(t5), "-t", "1", "-i", direct_url,
+                *FFMPEG_NET_FLAGS, "-ss", str(t1), "-t", "1", "-i", direct_url,
+                *FFMPEG_NET_FLAGS, "-ss", str(t2), "-t", "1", "-i", direct_url,
+                *FFMPEG_NET_FLAGS, "-ss", str(t3), "-t", "1", "-i", direct_url,
+                *FFMPEG_NET_FLAGS, "-ss", str(t4), "-t", "1", "-i", direct_url,
+                *FFMPEG_NET_FLAGS, "-ss", str(t5), "-t", "1", "-i", direct_url,
                 "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=8,scale=480:-2:flags=lanczos[v]",
                 "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "50", "-an", preview_file
             ], timeout=TIMEOUT_SEC, check=True)
