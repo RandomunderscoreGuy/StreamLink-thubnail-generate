@@ -71,7 +71,6 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
     safe_name = name.replace("'", "''") 
     safe_target = target_url.replace("'", "''") 
     
-    # 🚀 THE FIX: If the script fails, ONLY update the status. Do not wipe existing data!
     if status.startswith("FAILED") or status == "SKIPPED_NON_VIDEO":
         sql = f"UPDATE global_assets SET preview_animation = '{status}' WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
     else:
@@ -79,17 +78,9 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
         res_val = f"'{res}'" if res != "NULL" else "NULL"
         codec_val = f"'{codec}'" if codec != "NULL" else "NULL"
         
-        sql = f"""
-            UPDATE global_assets 
-            SET thumbnail = {poster_val}, 
-                preview_animation = '{status}',
-                duration = {int(duration)},
-                resolution = {res_val},
-                codec = {codec_val},
-                audio_channels = {int(audio)},
-                is_hdr = {int(is_hdr)}
-            WHERE target_url = '{safe_target}' AND name = '{safe_name}';
-        """
+        # 🚀 THE FIX: Single-line SQL string prevents the Wrangler CLI from breaking on hidden newlines!
+        sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, audio_channels = {int(audio)}, is_hdr = {int(is_hdr)} WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
+        
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
 
 # ==========================================
