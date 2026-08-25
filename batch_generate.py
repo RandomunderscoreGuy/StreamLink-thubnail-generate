@@ -254,17 +254,38 @@ while True:
                 "-vf", "scale=800:-2:flags=lanczos", poster_file
             ], timeout=TIMEOUT_SEC, check=True)
             
-            # Animated WebP Preview
+            # 🚀 THE FIX: Sequential extraction to prevent CDN DDoS Bans
+            log("   📥 Extracting animation frames sequentially...")
+            clip_files = []
+            for i, t in enumerate([t1, t2, t3, t4, t5]):
+                clip_name = f"temp_clip_{i}.mp4"
+                clip_files.append(clip_name)
+                
+                # Download 1-second chunks one at a time using ultrafast local encoding
+                subprocess.run([
+                    "ffmpeg", "-y", "-v", "error",
+                    *FFMPEG_NET_FLAGS,
+                    "-ss", str(t), "-t", "1", "-i", direct_url,
+                    "-vf", "scale=480:-2:flags=lanczos,fps=8",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-an", 
+                    clip_name
+                ], timeout=120, check=True)
+                
+                time.sleep(1.5) # Let the CDN breathe between requests
+                
+            log("   🧬 Stitching local files into Animated WebP...")
+            # Combine the local MP4s into the final animated WebP (Zero Network Usage!)
             subprocess.run([
                 "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
-                *FFMPEG_NET_FLAGS, "-ss", str(t1), "-t", "1", "-i", direct_url,
-                *FFMPEG_NET_FLAGS, "-ss", str(t2), "-t", "1", "-i", direct_url,
-                *FFMPEG_NET_FLAGS, "-ss", str(t3), "-t", "1", "-i", direct_url,
-                *FFMPEG_NET_FLAGS, "-ss", str(t4), "-t", "1", "-i", direct_url,
-                *FFMPEG_NET_FLAGS, "-ss", str(t5), "-t", "1", "-i", direct_url,
-                "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,fps=8,scale=480:-2:flags=lanczos[v]",
+                "-i", clip_files[0], "-i", clip_files[1], "-i", clip_files[2], "-i", clip_files[3], "-i", clip_files[4],
+                "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0[v]",
                 "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "50", "-an", preview_file
             ], timeout=TIMEOUT_SEC, check=True)
+
+            # Cleanup the temporary chunk files
+            for clip in clip_files:
+                if os.path.exists(clip):
+                    os.remove(clip)
 
             log("   ☁️ Uploading optimized WebP files to Scaleway...")
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
