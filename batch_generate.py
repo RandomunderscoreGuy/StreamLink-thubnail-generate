@@ -240,58 +240,85 @@ while True:
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 continue
 
-            # 4. Long Videos -> Poster & Animated Preview
+            # 4. Long Videos -> Poster & Animated Preview (Resilient Engine)
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
             log("   ⚙️ Generating optimized WebP assets...")
             
-            # Static Poster
-            subprocess.run([
-                "ffmpeg", "-y", "-v", "error",
+            # Robust HTTP demuxing flags for TorBox / PikPak CDNs
+            FFMPEG_HTTP_SEEK = [
                 *FFMPEG_NET_FLAGS,
-                "-ss", str(t1), 
-                "-i", direct_url, "-frames:v", "1", 
-                "-c:v", "libwebp", "-q:v", "65", 
-                "-vf", "scale=800:-2:flags=lanczos", poster_file
-            ], timeout=TIMEOUT_SEC, check=True)
-            
-            # 🚀 THE FIX: Sequential extraction to prevent CDN DDoS Bans
+                "-seekable", "1",
+                "-analyzeduration", "10000000",
+                "-probesize", "10000000"
+            ]
+
             log("   📥 Extracting animation frames sequentially...")
             clip_files = []
+            animation_failed = False
+
             for i, t in enumerate([t1, t2, t3, t4, t5]):
                 clip_name = f"temp_clip_{i}.mp4"
-                clip_files.append(clip_name)
                 
-                # Download 1-second chunks one at a time using ultrafast local encoding
+                try:
+                    subprocess.run([
+                        "ffmpeg", "-y", "-v", "error",
+                        *FFMPEG_HTTP_SEEK,
+                        "-ss", str(t), "-t", "1", "-i", direct_url,
+                        "-vf", "scale=480:-2:flags=lanczos,fps=8",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-an", 
+                        clip_name
+                    ], timeout=90, check=True)
+                    clip_files.append(clip_name)
+                except Exception as clip_err:
+                    log(f"   ⚠️ Frame {i+1}/5 seek dropped by CDN: {clip_err}")
+                    animation_failed = True
+                    break
+                
+                time.sleep(2)  # Cooldown between sequential requests to avoid HTTP 429
+
+            # 🚀 OPTIMIZATION: Extract the static poster locally from temp_clip_0 (0 Network Calls)
+            if len(clip_files) > 0 and os.path.exists(clip_files[0]):
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error",
-                    *FFMPEG_NET_FLAGS,
-                    "-ss", str(t), "-t", "1", "-i", direct_url,
-                    "-vf", "scale=480:-2:flags=lanczos,fps=8",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-an", 
-                    clip_name
-                ], timeout=120, check=True)
-                
-                time.sleep(1.5) # Let the CDN breathe between requests
-                
-            log("   🧬 Stitching local files into Animated WebP...")
-            # Combine the local MP4s into the final animated WebP (Zero Network Usage!)
-            subprocess.run([
-                "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
-                "-i", clip_files[0], "-i", clip_files[1], "-i", clip_files[2], "-i", clip_files[3], "-i", clip_files[4],
-                "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0[v]",
-                "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "50", "-an", preview_file
-            ], timeout=TIMEOUT_SEC, check=True)
+                    "-i", clip_files[0], "-frames:v", "1",
+                    "-c:v", "libwebp", "-q:v", "65",
+                    "-vf", "scale=800:-2:flags=lanczos", poster_file
+                ], check=True)
+            else:
+                # Direct fallback for poster if clip extraction failed early
+                subprocess.run([
+                    "ffmpeg", "-y", "-v", "error",
+                    *FFMPEG_HTTP_SEEK,
+                    "-ss", str(t1), "-i", direct_url, "-frames:v", "1",
+                    "-c:v", "libwebp", "-q:v", "65",
+                    "-vf", "scale=800:-2:flags=lanczos", poster_file
+                ], timeout=TIMEOUT_SEC, check=True)
 
-            # Cleanup the temporary chunk files
+            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
+
+            # Stitch into animated WebP if all clips succeeded
+            if not animation_failed and len(clip_files) == 5:
+                log("   🧬 Stitching local files into Animated WebP...")
+                subprocess.run([
+                    "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
+                    "-i", clip_files[0], "-i", clip_files[1], "-i", clip_files[2], "-i", clip_files[3], "-i", clip_files[4],
+                    "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0[v]",
+                    "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "50", "-an", preview_file
+                ], timeout=TIMEOUT_SEC, check=True)
+
+                log("   ☁️ Uploading optimized WebP files to Scaleway...")
+                cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "image/webp")
+                update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
+            else:
+                # Graceful fallback: save poster and metadata without breaking the queue
+                log("   🛡️ Saved static poster fallback due to CDN seek limit.")
+                update_db_status(target_url, name, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
+
+            # Cleanup temporary chunks
             for clip in clip_files:
                 if os.path.exists(clip):
                     os.remove(clip)
 
-            log("   ☁️ Uploading optimized WebP files to Scaleway...")
-            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
-            cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "image/webp")
-            
-            update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
             log("   ✅ Upload & DB Update Complete!")
 
         except urllib.error.HTTPError as e:
