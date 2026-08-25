@@ -101,21 +101,11 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
-    log("🔍 Querying D1 database for pending files...")
+log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"""
         SELECT hash, target_url, name, size 
         FROM global_assets 
         WHERE preview_animation IS NULL 
-          AND (
-            LOWER(name) LIKE '%.mp4' OR 
-            LOWER(name) LIKE '%.mkv' OR 
-            LOWER(name) LIKE '%.avi' OR 
-            LOWER(name) LIKE '%.mov' OR 
-            LOWER(name) LIKE '%.m4v' OR 
-            LOWER(name) LIKE '%.flv' OR 
-            LOWER(name) LIKE '%.webm' OR 
-            LOWER(name) LIKE '%.wmv'
-          )
         ORDER BY created_at DESC 
         LIMIT {BATCH_SIZE};
     """
