@@ -93,15 +93,22 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
+    log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"SELECT hash, target_url, name, size FROM global_assets WHERE preview_animation IS NULL ORDER BY created_at DESC LIMIT {BATCH_SIZE};"
     result = subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", fetch_sql, "--json"], capture_output=True, text=True)
 
     try:
         raw_output = result.stdout.strip()
+        if result.returncode != 0 or not raw_output:
+            log(f"⚠️ D1 Query returned error/empty: {result.stderr[:200]}")
+            time.sleep(10)
+            continue
+
         json_start = raw_output.find('[') if '[' in raw_output else raw_output.find('{')
         parsed_json = json.loads(raw_output[json_start:]) if json_start != -1 else []
         pending_files = parsed_json[0].get("results", []) if isinstance(parsed_json, list) else parsed_json.get("results", [])
-    except Exception:
+    except Exception as e:
+        log(f"⚠️ Failed to parse D1 response: {e}")
         time.sleep(10)
         continue
 
@@ -110,6 +117,8 @@ while True:
         time.sleep(30)
         continue
 
+    log(f"📦 Found {len(pending_files)} item(s) in queue.")
+
     for idx, file_record in enumerate(pending_files):
         if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
             exit(0)
@@ -117,6 +126,15 @@ while True:
         name = file_record["name"]
         target_url = file_record["target_url"]
         file_size = file_record["size"]
+
+        # Tag non-video files with a quick log
+        valid_video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.webm', '.wmv')
+        if not name.lower().endswith(valid_video_exts):
+            log(f"⏩ Skipping non-video: {name}")
+            update_db_status(target_url, name, "SKIPPED_NON_VIDEO")
+            continue
+
+        log(f"\n[{idx + 1}/{len(pending_files)}] 🎬 Processing: {name}")
 
         # 🚀 THE BOUNCER: Instantly skip and tag non-video files SILENTLY
         valid_video_exts = ('.mp4', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.webm', '.wmv')
