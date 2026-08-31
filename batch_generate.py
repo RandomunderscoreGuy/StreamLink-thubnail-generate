@@ -85,7 +85,7 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
 # ==========================================
 # 5. CONTINUOUS ENGINE LOOP
 # ==========================================
-log("🚀 Starting Continuous 6-Hour Preview Engine (High-Quality V2 Edition)...")
+log("🚀 Starting Continuous 6-Hour Preview Engine (V2 HQ Edition - JPEG & MP4)...")
 
 FFMPEG_NET_FLAGS = [
     "-user_agent", headers["User-Agent"],
@@ -150,7 +150,12 @@ while True:
         magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
         unique_file_id = f"{magnet_hash}_{re.sub(r'[^a-zA-Z0-9]', '_', name)}"
         
-        poster_file, preview_file = "thumbnail.webp", "preview.webp"
+        # 🚀 NEW: JPEG Poster and MP4 Preview
+        poster_key = f"thumbnails/{unique_file_id}_hq_poster.jpg"
+        preview_key = f"thumbnails/{unique_file_id}_hq_preview.mp4"
+        
+        poster_file, preview_file = "thumbnail.jpg", "preview.mp4"
+        
         if os.path.exists(poster_file): os.remove(poster_file)
         if os.path.exists(preview_file): os.remove(preview_file)
 
@@ -184,16 +189,22 @@ while True:
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
             
+            # Guard for completely broken or unready files
             if (duration <= 0 and codec == 'UNKNOWN') or width == 0:
                 log("   ⚠️ Stream unreadable or still downloading on CDN. Marking for retry...")
                 update_db_status(target_url, name, "FAILED_UNREADABLE_OR_DOWNLOADING")
                 continue
 
-            if width >= 7600 or height >= 4320: resolution = "8K"
-            elif width >= 3800 or height >= 2160: resolution = "4K"
-            elif width >= 1900 or height >= 1080: resolution = "1080p"
-            elif width >= 1200 or height >= 720: resolution = "720p"
-            else: resolution = "480p"
+            if width >= 7600 or height >= 4320: 
+                resolution = "8K"
+            elif width >= 3800 or height >= 2160: 
+                resolution = "4K"
+            elif width >= 1900 or height >= 1080: 
+                resolution = "1080p"
+            elif width >= 1200 or height >= 720: 
+                resolution = "720p"
+            else: 
+                resolution = "480p"
 
             is_hdr = 1 if color in ['smpte2084', 'arib-std-b67'] else 0
             hdr_badge = " HDR" if is_hdr else ""
@@ -201,34 +212,30 @@ while True:
 
             log(f"   📊 Found: {resolution}{hdr_badge} | {codec}{audio_badge} | {int(duration)}s")
 
-            # 🚀 THE SORTING FIX: Append _hq to all new generated files!
-            poster_key = f"thumbnails/{unique_file_id}_hq_poster.webp"
-            preview_key = f"thumbnails/{unique_file_id}_hq_preview.webp"
-
             time.sleep(1)
 
-            # 3. Short Videos (<120s) -> Poster Only
+            # 3. Short Videos (<120s) -> JPEG Poster Only
             if duration < 120:
-                log("   ⏩ Short video. Generating HQ poster only...")
+                log("   ⏩ Short video. Generating HQ JPEG poster only...")
                 seek_time = "00:00:00" if duration <= 1 else "00:00:01"
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error",
                     *FFMPEG_NET_FLAGS,
                     "-ss", seek_time, 
                     "-i", direct_url, "-frames:v", "1", 
-                    "-c:v", "libwebp", "-q:v", "85", # 🚀 Upgraded Quality
-                    "-vf", "scale=1280:-2:flags=lanczos", # 🚀 Upgraded Scale
-                    poster_file
+                    "-q:v", "2", 
+                    "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], timeout=TIMEOUT_SEC, check=True)
                 
-                cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
+                cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 continue
 
-            # 4. Long Videos -> HQ Poster & Animated Preview
+            # 4. Long Videos -> JPEG Poster & MP4 Preview (Resilient Engine)
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
-            log("   ⚙️ Generating HQ WebP assets...")
+            log("   ⚙️ Generating HQ V2 assets...")
             
+            # Robust HTTP demuxing flags for TorBox / PikPak CDNs
             FFMPEG_HTTP_SEEK = [
                 *FFMPEG_NET_FLAGS,
                 "-seekable", "1",
@@ -236,7 +243,7 @@ while True:
                 "-probesize", "10000000"
             ]
 
-            log("   📥 Extracting high-res animation frames sequentially...")
+            log("   📥 Extracting animation frames sequentially...")
             clip_files = []
             animation_failed = False
 
@@ -248,7 +255,7 @@ while True:
                         "ffmpeg", "-y", "-v", "error",
                         *FFMPEG_HTTP_SEEK,
                         "-ss", str(t), "-t", "1", "-i", direct_url,
-                        # 🚀 Upgraded Frame Extraction (640p at 10fps)
+                        # 🚀 640p at 10fps for smooth motion
                         "-vf", "scale=640:-2:flags=lanczos,fps=10",
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-an", 
                         clip_name
@@ -259,50 +266,52 @@ while True:
                     animation_failed = True
                     break
                 
-                time.sleep(2) 
+                time.sleep(2)  # Cooldown between sequential requests to avoid HTTP 429
 
-            # 🚀 Extract HQ Static Poster locally
+            # 🚀 Extract HQ Static JPEG Poster locally
             if len(clip_files) > 0 and os.path.exists(clip_files[0]):
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error",
                     "-i", clip_files[0], "-frames:v", "1",
-                    "-c:v", "libwebp", "-q:v", "85", # 🚀 Upgraded Quality
-                    "-vf", "scale=1280:-2:flags=lanczos", # 🚀 Upgraded Scale
-                    poster_file
+                    "-q:v", "2",
+                    "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], check=True)
             else:
+                # Direct fallback for poster if clip extraction failed early
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error",
                     *FFMPEG_HTTP_SEEK,
                     "-ss", str(t1), "-i", direct_url, "-frames:v", "1",
-                    "-c:v", "libwebp", "-q:v", "85",
-                    "-vf", "scale=1280:-2:flags=lanczos",
-                    poster_file
+                    "-q:v", "2",
+                    "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], timeout=TIMEOUT_SEC, check=True)
 
-            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/webp")
+            cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
 
+            # Stitch into Cinematic MP4 if all clips succeeded
             if not animation_failed and len(clip_files) == 5:
-                log("   🧬 Stitching local files into Smooth Animated WebP...")
+                log("   🧬 Stitching local files into Cinematic MP4 Preview...")
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "fatal", "-err_detect", "ignore_err",
                     "-i", clip_files[0], "-i", clip_files[1], "-i", clip_files[2], "-i", clip_files[3], "-i", clip_files[4],
                     "-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0[v]",
-                    # 🚀 Upgraded Animation Quality (75 instead of 50)
-                    "-map", "[v]", "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "75", "-an", preview_file
+                    "-map", "[v]", "-c:v", "libx264", "-preset", "faster", "-crf", "24", "-pix_fmt", "yuv420p", "-an", preview_file
                 ], timeout=TIMEOUT_SEC, check=True)
 
-                log("   ☁️ Uploading V2 WebP files to Scaleway...")
-                cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "image/webp")
+                log("   ☁️ Uploading V2 Previews to Scaleway...")
+                cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
                 update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
             else:
+                # Graceful fallback: save poster and metadata without breaking the queue
                 log("   🛡️ Saved static poster fallback due to CDN seek limit.")
                 update_db_status(target_url, name, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
 
+            # Cleanup temporary chunks
             for clip in clip_files:
-                if os.path.exists(clip): os.remove(clip)
+                if os.path.exists(clip):
+                    os.remove(clip)
 
-            log("   ✅ V2 Upload & DB Update Complete!")
+            log("   ✅ Upload & DB Update Complete!")
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8', errors='ignore')
