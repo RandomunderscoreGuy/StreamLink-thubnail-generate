@@ -223,7 +223,7 @@ while True:
                     *FFMPEG_NET_FLAGS,
                     "-ss", seek_time, 
                     "-i", direct_url, "-frames:v", "1", 
-                    "-q:v", "2", 
+                    "-qscale:v", "2", 
                     "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], timeout=TIMEOUT_SEC, check=True)
                 
@@ -268,23 +268,26 @@ while True:
                 
                 time.sleep(2)  # Cooldown between sequential requests to avoid HTTP 429
 
-            # 🚀 Extract HQ Static JPEG Poster locally
-            if len(clip_files) > 0 and os.path.exists(clip_files[0]):
-                subprocess.run([
-                    "ffmpeg", "-y", "-v", "error",
-                    "-i", clip_files[0], "-frames:v", "1",
-                    "-q:v", "2",
-                    "-vf", "scale=1280:-2:flags=lanczos", poster_file
-                ], check=True)
-            else:
-                # Direct fallback for poster if clip extraction failed early
+            # 🚀 Extract HQ Static JPEG Poster DIRECTLY from the original raw source
+            log("   📸 Extracting 1280px HQ Poster from raw source...")
+            try:
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error",
                     *FFMPEG_HTTP_SEEK,
                     "-ss", str(t1), "-i", direct_url, "-frames:v", "1",
-                    "-q:v", "2",
+                    "-qscale:v", "2", 
                     "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], timeout=TIMEOUT_SEC, check=True)
+            except Exception as poster_err:
+                log(f"   ⚠️ Raw poster extraction failed: {poster_err}")
+                # Fallback to clip 0 ONLY if the raw network fetch completely fails
+                if len(clip_files) > 0 and os.path.exists(clip_files[0]):
+                    subprocess.run([
+                        "ffmpeg", "-y", "-v", "error",
+                        "-i", clip_files[0], "-frames:v", "1",
+                        "-qscale:v", "2",
+                        "-vf", "scale=1280:-2:flags=lanczos", poster_file
+                    ], check=True)
 
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
 
