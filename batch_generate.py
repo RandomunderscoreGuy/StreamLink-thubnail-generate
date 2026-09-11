@@ -243,30 +243,42 @@ while True:
                 "-probesize", "10000000"
             ]
 
-            log("   📥 Extracting animation frames sequentially...")
+            log("   📥 Extracting animation frames with CDN Retry Logic...")
             clip_files = []
             animation_failed = False
+            MAX_RETRIES = 3
 
             for i, t in enumerate([t1, t2, t3, t4, t5]):
                 clip_name = f"temp_clip_{i}.mp4"
+                success = False
                 
-                try:
-                    subprocess.run([
-                        "ffmpeg", "-y", "-v", "error",
-                        *FFMPEG_HTTP_SEEK,
-                        "-ss", str(t), "-t", "1", "-i", direct_url,
-                        # 🚀 640p at 10fps for smooth motion
-                        "-vf", "scale=640:-2:flags=lanczos,fps=10",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-an", 
-                        clip_name
-                    ], timeout=90, check=True)
-                    clip_files.append(clip_name)
-                except Exception as clip_err:
-                    log(f"   ⚠️ Frame {i+1}/5 seek dropped by CDN: {clip_err}")
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        subprocess.run([
+                            "ffmpeg", "-y", "-v", "error",
+                            *FFMPEG_HTTP_SEEK,
+                            "-ss", str(t), "-t", "1", "-i", direct_url,
+                            # 🚀 640p at 10fps for smooth motion
+                            "-vf", "scale=640:-2:flags=lanczos,fps=10",
+                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-an", 
+                            clip_name
+                        ], timeout=90, check=True)
+                        
+                        success = True
+                        clip_files.append(clip_name)
+                        break # Break out of the retry loop if successful
+                        
+                    except subprocess.CalledProcessError as clip_err:
+                        log(f"   ⚠️ CDN limit hit on frame {i+1}/5. Retrying in 5s... (Attempt {attempt+1}/{MAX_RETRIES})")
+                        time.sleep(5) # Give the CDN time to clear the TCP connection
+                
+                if not success:
+                    log(f"   ❌ Completely failed to extract frame {i+1} after {MAX_RETRIES} attempts.")
                     animation_failed = True
                     break
                 
-                time.sleep(2)  # Cooldown between sequential requests to avoid HTTP 429
+                # Cooldown between sequential requests to avoid HTTP 429
+                time.sleep(3.5)
 
             # 🚀 Extract HQ Static JPEG Poster DIRECTLY from the original raw source
             log("   📸 Extracting 1280px HQ Poster from raw source...")
