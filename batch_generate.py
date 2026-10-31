@@ -100,6 +100,9 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
+    # 🚀 NEW: Track successfully processed hashes for this batch
+    completed_hashes = []
+
     log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"""
         SELECT hash, target_url, name, size 
@@ -229,6 +232,7 @@ while True:
                 
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
+                completed_hashes.append(raw_hash) # 🚀 Track success
                 continue
 
             # 4. Long Videos -> JPEG Poster & MP4 Preview (Resilient Engine)
@@ -258,7 +262,6 @@ while True:
                             "ffmpeg", "-y", "-v", "error",
                             *FFMPEG_HTTP_SEEK,
                             "-ss", str(t), "-t", "1", "-i", direct_url,
-                            # 🚀 640p at 10fps for smooth motion
                             "-vf", "scale=640:-2:flags=lanczos,fps=10",
                             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-an", 
                             clip_name
@@ -266,18 +269,17 @@ while True:
                         
                         success = True
                         clip_files.append(clip_name)
-                        break # Break out of the retry loop if successful
+                        break
                         
                     except subprocess.CalledProcessError as clip_err:
                         log(f"   ⚠️ CDN limit hit on frame {i+1}/5. Retrying in 5s... (Attempt {attempt+1}/{MAX_RETRIES})")
-                        time.sleep(5) # Give the CDN time to clear the TCP connection
+                        time.sleep(5)
                 
                 if not success:
                     log(f"   ❌ Completely failed to extract frame {i+1} after {MAX_RETRIES} attempts.")
                     animation_failed = True
                     break
                 
-                # Cooldown between sequential requests to avoid HTTP 429
                 time.sleep(3.5)
 
             # 🚀 Extract HQ Static JPEG Poster DIRECTLY from the original raw source
@@ -292,7 +294,6 @@ while True:
                 ], timeout=TIMEOUT_SEC, check=True)
             except Exception as poster_err:
                 log(f"   ⚠️ Raw poster extraction failed: {poster_err}")
-                # Fallback to clip 0 ONLY if the raw network fetch completely fails
                 if len(clip_files) > 0 and os.path.exists(clip_files[0]):
                     subprocess.run([
                         "ffmpeg", "-y", "-v", "error",
@@ -316,12 +317,12 @@ while True:
                 log("   ☁️ Uploading V2 Previews to Scaleway...")
                 cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
                 update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
+                completed_hashes.append(raw_hash) # 🚀 Track success
             else:
-                # Graceful fallback: save poster and metadata without breaking the queue
                 log("   🛡️ Saved static poster fallback due to CDN seek limit.")
                 update_db_status(target_url, name, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
+                completed_hashes.append(raw_hash) # 🚀 Track success
 
-            # Cleanup temporary chunks
             for clip in clip_files:
                 if os.path.exists(clip):
                     os.remove(clip)
@@ -335,5 +336,17 @@ while True:
         except Exception as e:
             log(f"   ❌ ERROR: {e}")
             update_db_status(target_url, name, "FAILED")
+
+    # 🚀 NEW: Ping the bulk webhook ONE TIME after the batch completes
+    if completed_hashes:
+        log(f"   🔔 Pinging Bulk Webhook to update {len(completed_hashes)} parent folders...")
+        try:
+            webhook_url = f"{API_BASE_URL}drive/webhook/finalize"
+            payload = json.dumps({"hashes": completed_hashes}).encode('utf-8')
+            req = urllib.request.Request(webhook_url, data=payload, headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=15) as response:
+                log(f"   ✅ Webhook success: {response.read().decode()}")
+        except Exception as e:
+            log(f"   ⚠️ Webhook failed (non-fatal): {e}")
 
     time.sleep(2)
