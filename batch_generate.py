@@ -72,13 +72,15 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
     safe_target = target_url.replace("'", "''") 
     
     if status.startswith("FAILED") or status == "SKIPPED_NON_VIDEO":
-        sql = f"UPDATE global_assets SET preview_animation = '{status}' WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
+        # ADDED: migrated = 0
+        sql = f"UPDATE global_assets SET preview_animation = '{status}', migrated = 0 WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
     else:
         poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
         res_val = f"'{res}'" if res != "NULL" else "NULL"
         codec_val = f"'{codec}'" if codec != "NULL" else "NULL"
         
-        sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, audio_channels = {int(audio)}, is_hdr = {int(is_hdr)} WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
+        # ADDED: migrated = 0
+        sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, migrated = 0 WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
         
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
 
