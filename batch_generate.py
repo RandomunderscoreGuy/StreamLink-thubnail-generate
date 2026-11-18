@@ -72,14 +72,12 @@ def update_db_status(target_url, name, status, poster_url=None, duration=0, res=
     safe_target = target_url.replace("'", "''") 
     
     if status.startswith("FAILED") or status == "SKIPPED_NON_VIDEO":
-        # ADDED: migrated = 0
         sql = f"UPDATE global_assets SET preview_animation = '{status}', migrated = 0 WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
     else:
         poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
         res_val = f"'{res}'" if res != "NULL" else "NULL"
         codec_val = f"'{codec}'" if codec != "NULL" else "NULL"
         
-        # ADDED: migrated = 0
         sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, migrated = 0 WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
         
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
@@ -102,8 +100,9 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
-    # 🚀 NEW: Track successfully processed hashes for this batch
+    # 🚀 Track successfully processed hashes and the last poster URL for the webhook
     completed_hashes = []
+    last_poster_url = None
 
     log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"""
@@ -155,7 +154,6 @@ while True:
         magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
         unique_file_id = f"{magnet_hash}_{re.sub(r'[^a-zA-Z0-9]', '_', name)}"
         
-        # 🚀 NEW: JPEG Poster and MP4 Preview
         poster_key = f"thumbnails/{unique_file_id}_hq_poster.jpg"
         preview_key = f"thumbnails/{unique_file_id}_hq_preview.mp4"
         
@@ -194,7 +192,6 @@ while True:
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
             
-            # Guard for completely broken or unready files
             if (duration <= 0 and codec == 'UNKNOWN') or width == 0:
                 log("   ⚠️ Stream unreadable or still downloading on CDN. Marking for retry...")
                 update_db_status(target_url, name, "FAILED_UNREADABLE_OR_DOWNLOADING")
@@ -234,14 +231,14 @@ while True:
                 
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                completed_hashes.append(raw_hash) # 🚀 Track success
+                completed_hashes.append(raw_hash)
+                last_poster_url = cdn_poster # 🚀 Saved for webhook payload
                 continue
 
             # 4. Long Videos -> JPEG Poster & MP4 Preview (Resilient Engine)
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
             log("   ⚙️ Generating HQ V2 assets...")
             
-            # Robust HTTP demuxing flags for TorBox / PikPak CDNs
             FFMPEG_HTTP_SEEK = [
                 *FFMPEG_NET_FLAGS,
                 "-seekable", "1",
@@ -305,6 +302,7 @@ while True:
                     ], check=True)
 
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
+            last_poster_url = cdn_poster # 🚀 Saved for webhook payload
 
             # Stitch into Cinematic MP4 if all clips succeeded
             if not animation_failed and len(clip_files) == 5:
@@ -319,11 +317,11 @@ while True:
                 log("   ☁️ Uploading V2 Previews to Scaleway...")
                 cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
                 update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                completed_hashes.append(raw_hash) # 🚀 Track success
+                completed_hashes.append(raw_hash)
             else:
                 log("   🛡️ Saved static poster fallback due to CDN seek limit.")
                 update_db_status(target_url, name, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                completed_hashes.append(raw_hash) # 🚀 Track success
+                completed_hashes.append(raw_hash)
 
             for clip in clip_files:
                 if os.path.exists(clip):
@@ -339,12 +337,15 @@ while True:
             log(f"   ❌ ERROR: {e}")
             update_db_status(target_url, name, "FAILED")
 
-    # 🚀 NEW: Ping the bulk webhook ONE TIME after the batch completes
+    # 🚀 Webhook Ping containing the new lightweight payload
     if completed_hashes:
         log(f"   🔔 Pinging Bulk Webhook to update {len(completed_hashes)} parent folders...")
         try:
             webhook_url = f"{API_BASE_URL}drive/webhook/finalize"
-            payload = json.dumps({"hashes": completed_hashes}).encode('utf-8')
+            payload = json.dumps({
+                "hashes": completed_hashes,
+                "posterUrl": last_poster_url
+            }).encode('utf-8')
             req = urllib.request.Request(webhook_url, data=payload, headers=headers, method='POST')
             with urllib.request.urlopen(req, timeout=15) as response:
                 log(f"   ✅ Webhook success: {response.read().decode()}")
