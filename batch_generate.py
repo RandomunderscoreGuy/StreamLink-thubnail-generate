@@ -24,7 +24,7 @@ BEARER_TOKEN = os.environ.get("API_BEARER_TOKEN")
 API_BASE_URL = "https://streamlink.cloud/api/"
 D1_DB_NAME = "streamlink-db"
 BATCH_SIZE = 10
-TIMEOUT_SEC = 180 
+TIMEOUT_SEC = 180
 
 if not BEARER_TOKEN:
     log("❌ API_BEARER_TOKEN missing from environment variables!")
@@ -51,13 +51,14 @@ class BaseStorageAdapter:
 class ScalewayAdapter(BaseStorageAdapter):
     def __init__(self):
         self.bucket = "streamlink-assets"
-        self.cdn_base = "https://media.streamlink.cloud" 
+        self.cdn_base = "https://media.streamlink.cloud"
         self.client = boto3.client(
             "s3", region_name="fr-par", endpoint_url="https://s3.fr-par.scw.cloud",
             aws_access_key_id=os.environ.get("SCW_ACCESS_KEY"),
             aws_secret_access_key=os.environ.get("SCW_SECRET_KEY"),
             config=Config(s3={"addressing_style": "virtual"})
         )
+
     def upload(self, local_path, s3_key, content_type):
         self.client.upload_file(local_path, self.bucket, s3_key, ExtraArgs={"ContentType": content_type, "ACL": "public-read"})
         return f"{self.cdn_base}/{s3_key}"
@@ -69,21 +70,22 @@ storage_engine = ScalewayAdapter()
 # ==========================================
 def update_db_status(raw_hash, status, poster_url=None, duration=0, res="NULL", codec="NULL", audio=2, is_hdr=0):
     safe_hash = raw_hash.replace("'", "''")
-    
+    safe_status = status.replace("'", "''")
+
     if status.startswith("FAILED") or status == "SKIPPED_NON_VIDEO":
-        sql = f"UPDATE global_assets SET preview_animation = '{status}', migrated = 0 WHERE hash = '{safe_hash}';"
+        sql = f"UPDATE global_assets SET preview_animation = '{safe_status}', migrated = 0 WHERE hash = '{safe_hash}';"
     else:
-        poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
+        poster_val = f"'{poster_url.replace(chr(39), chr(39)*2)}'" if poster_url else "thumbnail"
         res_val = f"'{res}'" if res != "NULL" else "NULL"
         codec_val = f"'{codec}'" if codec != "NULL" else "NULL"
-        
+
         sql = (
-            f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', "
+            f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{safe_status}', "
             f"duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, "
             f"audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, migrated = 0 "
             f"WHERE hash = '{safe_hash}';"
         )
-        
+
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
 
 # ==========================================
@@ -100,7 +102,7 @@ FFMPEG_NET_FLAGS = [
 ]
 
 while True:
-    if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
+    if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
@@ -108,10 +110,10 @@ while True:
 
     log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"""
-        SELECT hash, target_url, name, size 
-        FROM global_assets 
-        WHERE preview_animation IS NULL 
-        ORDER BY created_at DESC 
+        SELECT hash, target_url, name, size, provider_file_id
+        FROM global_assets
+        WHERE preview_animation IS NULL
+        ORDER BY created_at DESC
         LIMIT {BATCH_SIZE};
     """
 
@@ -139,34 +141,43 @@ while True:
     log(f"📦 Found {len(pending_files)} video(s) in queue.")
 
     for idx, file_record in enumerate(pending_files):
-        if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC: 
+        if (time.time() - ENGINE_START_TIME) >= MAX_RUNTIME_SEC:
             exit(0)
 
         name = file_record["name"]
         target_url = file_record["target_url"]
         file_size = file_record["size"]
         raw_hash = str(file_record.get("hash", ""))
+        provider_file_id = file_record.get("provider_file_id") or ""
 
         log(f"\n[{idx + 1}/{len(pending_files)}] 🎬 Processing: {name}")
 
         if "urn:btih:" not in raw_hash or "||" not in raw_hash:
             update_db_status(raw_hash, "FAILED_MALFORMED_HASH")
             continue
-            
+
         magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
         unique_file_id = f"{magnet_hash}_{re.sub(r'[^a-zA-Z0-9]', '_', name)}"
-        
+
         poster_key = f"thumbnails/{unique_file_id}_hq_poster.jpg"
         preview_key = f"thumbnails/{unique_file_id}_hq_preview.mp4"
-        
+
         poster_file, preview_file = "thumbnail.jpg", "preview.mp4"
-        
-        if os.path.exists(poster_file): os.remove(poster_file)
-        if os.path.exists(preview_file): os.remove(preview_file)
+
+        if os.path.exists(poster_file):
+            os.remove(poster_file)
+        if os.path.exists(preview_file):
+            os.remove(preview_file)
 
         try:
-            # 1. Resolve Direct URL
-            api_url = f"{API_BASE_URL}?url={urllib.parse.quote(target_url)}&action=play-direct&size={file_size}&fileName={urllib.parse.quote(name)}"
+            # 1. Resolve Direct URL (passes fileId so TorBox hits the fast path)
+            api_url = (
+                f"{API_BASE_URL}?url={urllib.parse.quote(target_url)}"
+                f"&action=play-direct&size={file_size}&fileName={urllib.parse.quote(name)}"
+            )
+            if provider_file_id:
+                api_url += f"&fileId={urllib.parse.quote(str(provider_file_id))}"
+
             req = urllib.request.Request(api_url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as response:
                 direct_url = json.loads(response.read().decode()).get("url")
@@ -176,14 +187,14 @@ while True:
 
             # 2. Advanced Metadata Extraction
             ffprobe_cmd = [
-                "ffprobe", "-v", "error", 
+                "ffprobe", "-v", "error",
                 *FFMPEG_NET_FLAGS,
-                "-show_entries", "stream=codec_type,width,height,codec_name,color_transfer,channels:format=duration", 
+                "-show_entries", "stream=codec_type,width,height,codec_name,color_transfer,channels:format=duration",
                 "-of", "json", direct_url
             ]
             probe_result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=30)
             probe_data = json.loads(probe_result.stdout) if probe_result.stdout else {}
-            
+
             duration = float(probe_data.get('format', {}).get('duration', 0) or 0)
             v_stream = next((s for s in probe_data.get('streams', []) if s.get('codec_type') == 'video'), {})
             a_stream = next((s for s in probe_data.get('streams', []) if s.get('codec_type') == 'audio'), {})
@@ -193,21 +204,21 @@ while True:
             codec = v_stream.get('codec_name', 'unknown').upper()
             color = v_stream.get('color_transfer', '')
             audio_channels = a_stream.get('channels', 2)
-            
+
             if (duration <= 0 and codec == 'UNKNOWN') or width == 0:
                 log("   ⚠️ Stream unreadable or still downloading on CDN. Marking for retry...")
                 update_db_status(raw_hash, "FAILED_UNREADABLE_OR_DOWNLOADING")
                 continue
 
-            if width >= 7600 or height >= 4320: 
+            if width >= 7600 or height >= 4320:
                 resolution = "8K"
-            elif width >= 3800 or height >= 2160: 
+            elif width >= 3800 or height >= 2160:
                 resolution = "4K"
-            elif width >= 1900 or height >= 1080: 
+            elif width >= 1900 or height >= 1080:
                 resolution = "1080p"
-            elif width >= 1200 or height >= 720: 
+            elif width >= 1200 or height >= 720:
                 resolution = "720p"
-            else: 
+            else:
                 resolution = "480p"
 
             is_hdr = 1 if color in ['smpte2084', 'arib-std-b67'] else 0
@@ -225,12 +236,12 @@ while True:
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error",
                     *FFMPEG_NET_FLAGS,
-                    "-ss", seek_time, 
-                    "-i", direct_url, "-frames:v", "1", 
-                    "-qscale:v", "2", 
+                    "-ss", seek_time,
+                    "-i", direct_url, "-frames:v", "1",
+                    "-qscale:v", "2",
                     "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], timeout=TIMEOUT_SEC, check=True)
-                
+
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(raw_hash, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
@@ -239,7 +250,7 @@ while True:
             # 4. Long Videos -> JPEG Poster & MP4 Preview
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
             log("   ⚙️ Generating HQ V2 assets...")
-            
+
             FFMPEG_HTTP_SEEK = [
                 *FFMPEG_NET_FLAGS,
                 "-seekable", "1",
@@ -255,7 +266,7 @@ while True:
             for i, t in enumerate([t1, t2, t3, t4, t5]):
                 clip_name = f"temp_clip_{i}.mp4"
                 success = False
-                
+
                 for attempt in range(MAX_RETRIES):
                     try:
                         subprocess.run([
@@ -263,23 +274,23 @@ while True:
                             *FFMPEG_HTTP_SEEK,
                             "-ss", str(t), "-t", "1", "-i", direct_url,
                             "-vf", "scale=640:-2:flags=lanczos,fps=10",
-                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-an", 
+                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-an",
                             clip_name
                         ], timeout=90, check=True)
-                        
+
                         success = True
                         clip_files.append(clip_name)
                         break
-                        
+
                     except subprocess.CalledProcessError:
                         log(f"   ⚠️ CDN limit hit on frame {i+1}/5. Retrying in 5s... (Attempt {attempt+1}/{MAX_RETRIES})")
                         time.sleep(5)
-                
+
                 if not success:
                     log(f"   ❌ Completely failed to extract frame {i+1} after {MAX_RETRIES} attempts.")
                     animation_failed = True
                     break
-                
+
                 time.sleep(3.5)
 
             log("   📸 Extracting 1280px HQ Poster from raw source...")
@@ -288,7 +299,7 @@ while True:
                     "ffmpeg", "-y", "-v", "error",
                     *FFMPEG_HTTP_SEEK,
                     "-ss", str(t1), "-i", direct_url, "-frames:v", "1",
-                    "-qscale:v", "2", 
+                    "-qscale:v", "2",
                     "-vf", "scale=1280:-2:flags=lanczos", poster_file
                 ], timeout=TIMEOUT_SEC, check=True)
             except Exception as poster_err:
@@ -339,8 +350,9 @@ while True:
         log(f"   🔔 Pinging Bulk Webhook to route {len(completed_updates)} new posters...")
         try:
             webhook_url = f"{API_BASE_URL}drive/webhook/finalize"
+            webhook_headers = {**headers, "Content-Type": "application/json"}
             payload = json.dumps({"updates": completed_updates}).encode('utf-8')
-            req = urllib.request.Request(webhook_url, data=payload, headers=headers, method='POST')
+            req = urllib.request.Request(webhook_url, data=payload, headers=webhook_headers, method='POST')
             with urllib.request.urlopen(req, timeout=15) as response:
                 log(f"   ✅ Webhook success: {response.read().decode()}")
         except Exception as e:
