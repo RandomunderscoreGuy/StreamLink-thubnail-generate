@@ -65,20 +65,24 @@ class ScalewayAdapter(BaseStorageAdapter):
 storage_engine = ScalewayAdapter()
 
 # ==========================================
-# 4. DATABASE UPDATE HELPER
+# 4. DATABASE UPDATE HELPER (Primary Key Lookup)
 # ==========================================
-def update_db_status(target_url, name, status, poster_url=None, duration=0, res="NULL", codec="NULL", audio=2, is_hdr=0):
-    safe_name = name.replace("'", "''") 
-    safe_target = target_url.replace("'", "''") 
+def update_db_status(raw_hash, status, poster_url=None, duration=0, res="NULL", codec="NULL", audio=2, is_hdr=0):
+    safe_hash = raw_hash.replace("'", "''")
     
     if status.startswith("FAILED") or status == "SKIPPED_NON_VIDEO":
-        sql = f"UPDATE global_assets SET preview_animation = '{status}', migrated = 0 WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
+        sql = f"UPDATE global_assets SET preview_animation = '{status}', migrated = 0 WHERE hash = '{safe_hash}';"
     else:
         poster_val = f"'{poster_url}'" if poster_url else "thumbnail"
         res_val = f"'{res}'" if res != "NULL" else "NULL"
         codec_val = f"'{codec}'" if codec != "NULL" else "NULL"
         
-        sql = f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, migrated = 0 WHERE target_url = '{safe_target}' AND name = '{safe_name}';"
+        sql = (
+            f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{status}', "
+            f"duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, "
+            f"audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, migrated = 0 "
+            f"WHERE hash = '{safe_hash}';"
+        )
         
     subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--remote", "--command", sql], stdout=subprocess.DEVNULL)
 
@@ -100,7 +104,6 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
-    # 🚀 NEW: Track precise mapping of hash -> target_url -> poster_url
     completed_updates = []
 
     log("🔍 Querying D1 database for pending files...")
@@ -142,12 +145,12 @@ while True:
         name = file_record["name"]
         target_url = file_record["target_url"]
         file_size = file_record["size"]
+        raw_hash = str(file_record.get("hash", ""))
 
         log(f"\n[{idx + 1}/{len(pending_files)}] 🎬 Processing: {name}")
 
-        raw_hash = str(file_record.get("hash", ""))
         if "urn:btih:" not in raw_hash or "||" not in raw_hash:
-            update_db_status(target_url, name, "FAILED_MALFORMED_HASH")
+            update_db_status(raw_hash, "FAILED_MALFORMED_HASH")
             continue
             
         magnet_hash = raw_hash.split("urn:btih:")[1].split("||")[0].upper()
@@ -193,7 +196,7 @@ while True:
             
             if (duration <= 0 and codec == 'UNKNOWN') or width == 0:
                 log("   ⚠️ Stream unreadable or still downloading on CDN. Marking for retry...")
-                update_db_status(target_url, name, "FAILED_UNREADABLE_OR_DOWNLOADING")
+                update_db_status(raw_hash, "FAILED_UNREADABLE_OR_DOWNLOADING")
                 continue
 
             if width >= 7600 or height >= 4320: 
@@ -229,12 +232,11 @@ while True:
                 ], timeout=TIMEOUT_SEC, check=True)
                 
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
-                update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                # 🚀 Exact hash routing match
+                update_db_status(raw_hash, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
                 continue
 
-            # 4. Long Videos -> JPEG Poster & MP4 Preview (Resilient Engine)
+            # 4. Long Videos -> JPEG Poster & MP4 Preview
             t1, t2, t3, t4, t5 = [round(duration * p, 2) for p in [0.10, 0.30, 0.50, 0.70, 0.90]]
             log("   ⚙️ Generating HQ V2 assets...")
             
@@ -269,7 +271,7 @@ while True:
                         clip_files.append(clip_name)
                         break
                         
-                    except subprocess.CalledProcessError as clip_err:
+                    except subprocess.CalledProcessError:
                         log(f"   ⚠️ CDN limit hit on frame {i+1}/5. Retrying in 5s... (Attempt {attempt+1}/{MAX_RETRIES})")
                         time.sleep(5)
                 
@@ -280,7 +282,6 @@ while True:
                 
                 time.sleep(3.5)
 
-            # 🚀 Extract HQ Static JPEG Poster DIRECTLY from the original raw source
             log("   📸 Extracting 1280px HQ Poster from raw source...")
             try:
                 subprocess.run([
@@ -302,7 +303,6 @@ while True:
 
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
 
-            # Stitch into Cinematic MP4 if all clips succeeded
             if not animation_failed and len(clip_files) == 5:
                 log("   🧬 Stitching local files into Cinematic MP4 Preview...")
                 subprocess.run([
@@ -314,13 +314,11 @@ while True:
 
                 log("   ☁️ Uploading V2 Previews to Scaleway...")
                 cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
-                update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                # 🚀 Exact hash routing match
+                update_db_status(raw_hash, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
             else:
                 log("   🛡️ Saved static poster fallback due to CDN seek limit.")
-                update_db_status(target_url, name, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                # 🚀 Exact hash routing match
+                update_db_status(raw_hash, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
                 completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
 
             for clip in clip_files:
@@ -332,12 +330,11 @@ while True:
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8', errors='ignore')
             log(f"   ❌ HTTP ERROR {e.code}: {e.reason} | Body: {error_body[:200]}")
-            update_db_status(target_url, name, f"FAILED_HTTP_{e.code}")
+            update_db_status(raw_hash, f"FAILED_HTTP_{e.code}")
         except Exception as e:
             log(f"   ❌ ERROR: {e}")
-            update_db_status(target_url, name, "FAILED")
+            update_db_status(raw_hash, "FAILED")
 
-    # 🚀 Webhook Ping containing the exact routing payload
     if completed_updates:
         log(f"   🔔 Pinging Bulk Webhook to route {len(completed_updates)} new posters...")
         try:
