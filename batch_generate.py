@@ -73,7 +73,12 @@ def update_db_status(raw_hash, status, poster_url=None, duration=0, res="NULL", 
     safe_status = status.replace("'", "''")
 
     if status.startswith("FAILED") or status == "SKIPPED_NON_VIDEO":
-        sql = f"UPDATE global_assets SET preview_animation = '{safe_status}', migrated = 0 WHERE hash = '{safe_hash}';"
+        sql = (
+            f"UPDATE global_assets "
+            f"SET preview_animation = '{safe_status}', "
+            f"migrated = CASE WHEN migrated = 1 THEN 2 ELSE 0 END "
+            f"WHERE hash = '{safe_hash}';"
+        )
     else:
         poster_val = f"'{poster_url.replace(chr(39), chr(39)*2)}'" if poster_url else "thumbnail"
         res_val = f"'{res}'" if res != "NULL" else "NULL"
@@ -82,7 +87,8 @@ def update_db_status(raw_hash, status, poster_url=None, duration=0, res="NULL", 
         sql = (
             f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{safe_status}', "
             f"duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, "
-            f"audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, migrated = 0 "
+            f"audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, "
+            f"migrated = CASE WHEN migrated = 1 THEN 2 ELSE 0 END "
             f"WHERE hash = '{safe_hash}';"
         )
 
