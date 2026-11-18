@@ -100,9 +100,8 @@ while True:
         log("⏳ Safety time limit reached. Gracefully exiting.")
         exit(0)
 
-    # 🚀 Track successfully processed hashes and the last poster URL for the webhook
-    completed_hashes = []
-    last_poster_url = None
+    # 🚀 NEW: Track precise mapping of hash -> target_url -> poster_url
+    completed_updates = []
 
     log("🔍 Querying D1 database for pending files...")
     fetch_sql = f"""
@@ -231,8 +230,8 @@ while True:
                 
                 cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
                 update_db_status(target_url, name, "SKIPPED_SHORT", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                completed_hashes.append(raw_hash)
-                last_poster_url = cdn_poster # 🚀 Saved for webhook payload
+                # 🚀 Exact hash routing match
+                completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
                 continue
 
             # 4. Long Videos -> JPEG Poster & MP4 Preview (Resilient Engine)
@@ -302,7 +301,6 @@ while True:
                     ], check=True)
 
             cdn_poster = storage_engine.upload(f"./{poster_file}", poster_key, "image/jpeg")
-            last_poster_url = cdn_poster # 🚀 Saved for webhook payload
 
             # Stitch into Cinematic MP4 if all clips succeeded
             if not animation_failed and len(clip_files) == 5:
@@ -317,11 +315,13 @@ while True:
                 log("   ☁️ Uploading V2 Previews to Scaleway...")
                 cdn_preview = storage_engine.upload(f"./{preview_file}", preview_key, "video/mp4")
                 update_db_status(target_url, name, cdn_preview, cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                completed_hashes.append(raw_hash)
+                # 🚀 Exact hash routing match
+                completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
             else:
                 log("   🛡️ Saved static poster fallback due to CDN seek limit.")
                 update_db_status(target_url, name, "POSTER_ONLY", cdn_poster, duration, resolution, codec, audio_channels, is_hdr)
-                completed_hashes.append(raw_hash)
+                # 🚀 Exact hash routing match
+                completed_updates.append({"hash": raw_hash, "targetUrl": target_url, "posterUrl": cdn_poster})
 
             for clip in clip_files:
                 if os.path.exists(clip):
@@ -337,15 +337,12 @@ while True:
             log(f"   ❌ ERROR: {e}")
             update_db_status(target_url, name, "FAILED")
 
-    # 🚀 Webhook Ping containing the new lightweight payload
-    if completed_hashes:
-        log(f"   🔔 Pinging Bulk Webhook to update {len(completed_hashes)} parent folders...")
+    # 🚀 Webhook Ping containing the exact routing payload
+    if completed_updates:
+        log(f"   🔔 Pinging Bulk Webhook to route {len(completed_updates)} new posters...")
         try:
             webhook_url = f"{API_BASE_URL}drive/webhook/finalize"
-            payload = json.dumps({
-                "hashes": completed_hashes,
-                "posterUrl": last_poster_url
-            }).encode('utf-8')
+            payload = json.dumps({"updates": completed_updates}).encode('utf-8')
             req = urllib.request.Request(webhook_url, data=payload, headers=headers, method='POST')
             with urllib.request.urlopen(req, timeout=15) as response:
                 log(f"   ✅ Webhook success: {response.read().decode()}")
