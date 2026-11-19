@@ -79,14 +79,16 @@ def update_db_status(raw_hash, status, poster_url=None, duration=0, res="NULL", 
             f"migrated = CASE WHEN migrated = 1 THEN 2 ELSE 0 END "
             f"WHERE hash = '{safe_hash}';"
         )
-    else:
+else:
         poster_val = f"'{poster_url.replace(chr(39), chr(39)*2)}'" if poster_url else "thumbnail"
+        screenshots_val = "NULL" if poster_url else "screenshots"
         res_val = f"'{res}'" if res != "NULL" else "NULL"
         codec_val = f"'{codec}'" if codec != "NULL" else "NULL"
 
         sql = (
-            f"UPDATE global_assets SET thumbnail = {poster_val}, preview_animation = '{safe_status}', "
-            f"duration = {int(duration)}, resolution = {res_val}, codec = {codec_val}, "
+            f"UPDATE global_assets SET thumbnail = {poster_val}, screenshots = {screenshots_val}, "
+            f"preview_animation = '{safe_status}', duration = {int(duration)}, "
+            f"resolution = {res_val}, codec = {codec_val}, "
             f"audio_channels = {int(audio)}, is_hdr = {int(is_hdr)}, "
             f"migrated = CASE WHEN migrated = 1 THEN 2 ELSE 0 END "
             f"WHERE hash = '{safe_hash}';"
